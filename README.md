@@ -9,6 +9,38 @@ Built on [imgui-bundle](https://github.com/pthom/imgui_bundle) (ImGui + ImPlot).
 
 ![Scalogram page](docs/scalogram.png)
 
+## What vnoiser does
+
+Per trace, 1-D, no spatial step.
+
+**Input to `Denoiser.run`:** one float trace `(n_frames,)` plus `fs`. It is expected to be z-scored dF/F, made
+upstream by `vnoiser.preprocess.domain_zscore`:
+1. mean fluorescence over the domain's pixels
+2. dF/F = (F - baseline) / baseline, Gaussian baseline with sigma 1500 samples
+3. z = -(dF/F - slower Gaussian baseline, sigma 5000) / SD(dF/F)
+
+The sign flip makes depolarization positive.
+
+**Operations:**
+1. Complex Morlet CWT (`pywt.cwt`, `cmor0.5-1.0`), 100 log-spaced scales 1 to 1000 (fs down to fs/1000 Hz).
+2. Group the 100 rows into 10 frequency bands: PCA on the standardized |W| of each row, then Ward clustering.
+3. Per band: mean of its rows (real part), savgol smoothing for bands at or below 75 Hz, then event windows by
+   threshold crossing (2 / 2.5 SD of the band trace). Bands with no events are dropped.
+4. Per band mask: 1 inside the (widened) windows, a floor outside (soft: 0.7 / 0.5 / 0.2 / 0.1 by band frequency),
+   Gaussian-smoothed.
+5. Sum of (band / sqrt(mean scale) x mask) over bands, plus a 1 Hz zero-phase FIR low-pass of the input.
+
+**Output:** `denoised (n_frames,)`, the same length and time base as the input, plus event start indices. The
+stored archive trace (`denoised_trace_scans.pkl`) is step 5 without the 1 Hz baseline.
+
+**Scaling:** the output is in the input's z units, with no rescaling to match the input. It is not
+amplitude-preserving:
+- Each band is the mean (not the sum) of its rows, divided by sqrt(mean scale). For a sine with every mask at 1, this
+  passes about 0.5 to 0.9 of its amplitude (defaults, fs 1075 Hz), depending on frequency.
+- Between events, each band is multiplied by its floor (0.1 to 0.7).
+- Event peaks come back smaller than in the input.
+- The 1 Hz baseline is added at gain 1.
+
 ## Install
 
 Needs a vnoiser checkout next to this one (`../vnoiser`, see `[tool.uv.sources]` in `pyproject.toml`).
