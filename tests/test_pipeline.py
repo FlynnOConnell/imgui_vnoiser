@@ -88,7 +88,7 @@ def test_a_bad_setting_reports_the_stage_and_recovers(run):
 
 
 def test_python_export_reproduces_the_run():
-    s = make(source="tones")
+    s = make(source="spikes")
     s.b, s.c, s.n_scales = 2.0, 6 / (2 * np.pi), 60
     s.clust.n_subclusters = 7
     s.thres.soft_levels = (0.6, 0.4, 0.2, 0.05)

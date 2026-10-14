@@ -44,7 +44,7 @@ class Driver:
             hello_imgui.get_runner_params().app_shall_exit = True
 
 
-@pytest.mark.parametrize("first, then", [("spikes", ["impulse"]), ("jedi", ["chirp"])])
+@pytest.mark.parametrize("first, then", [("spikes", ["jedi"]), ("jedi", ["spikes"])])
 def test_every_page_renders(first, then):
     app = App()
     app.settings.signal.source = first

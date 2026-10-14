@@ -36,10 +36,11 @@ ABOUT = {
     "signal": (
         "Denoiser.run takes a z-scored dF/F trace. JEDI fluorescence decreases on depolarization, so the "
         "pipeline multiplies it by -1 first.",
-        "Ground truth (green) is the synthetic trace before noise is added. For JEDI3sub it is dff_clean from "
-        "simulate_jedi3sub_trace, sign-flipped and divided by the SD of the observed trace.",
-        "Impulse: each CWT row equals the wavelet at that row's scale. Chirp: the frequency rises exponentially "
-        "from the low to the high value over the trace.",
+        "Spikes and bumps: 5 Gaussian bumps and 14 spikes at fixed times, repeating every 4 s, plus white noise. "
+        "Ground truth is the trace before the noise is added.",
+        "JEDI3sub: vnoiser.simulate_jedi3sub_trace. Simulated membrane voltage, converted to JEDI3sub dF/F with "
+        "the indicator's delay and kinetics, plus line-scan noise, motion, bleaching and AP artifacts. Ground "
+        "truth is dff_clean (no noise or artifacts), sign-flipped and divided by the SD of the observed trace.",
     ),
     "wavelet": (
         "pywt cmorB-C: psi(t) = exp(-t^2 / B) exp(2j pi C t) / sqrt(pi B). At scale s and sampling rate fs the "
@@ -397,12 +398,6 @@ class App:
             imgui.same_line()
             if imgui.small_button("New noise draw"):
                 sp.seed += 1
-        if sp.source == "tones":
-            _, sp.tones_hz = imgui.input_text("tones (Hz)", sp.tones_hz)
-            hint("Frequencies in Hz, comma separated.")
-        if sp.source == "chirp":
-            _, sp.chirp_lo_hz = imgui.input_float("from (Hz)", sp.chirp_lo_hz, 0, 0, "%.3g")
-            _, sp.chirp_hi_hz = imgui.input_float("to (Hz)", sp.chirp_hi_hz, 0, 0, "%.3g")
         if sp.source == "file":
             _, sp.path = imgui.input_text("##path", sp.path)
             imgui.same_line()

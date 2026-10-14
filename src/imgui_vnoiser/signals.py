@@ -1,6 +1,5 @@
 """
-Input traces for the window: synthetic ones with a ground truth, test signals that show what the wavelet
-transform does (tones, a chirp, an impulse, a step), and traces read from a file.
+Input traces for the window: two synthetic traces with a ground truth, and traces read from a file.
 """
 
 from dataclasses import dataclass, field
@@ -13,10 +12,6 @@ import numpy as np
 SOURCES = (
     ("spikes", "Spikes and bumps", "Gaussian bumps (60 to 180 ms) and spikes (3 SD, 4 ms decay), plus white noise; repeats every 4 s"),
     ("jedi", "JEDI3sub simulation", "vnoiser.simulate_jedi3sub_trace, sign-flipped and z-scored"),
-    ("tones", "Sum of tones", "unit sines; tone k of n is on from k / (n + 1) to (k + 2) / (n + 1) of the trace"),
-    ("chirp", "Chirp", "unit sine, frequency rising exponentially from low to high"),
-    ("impulse", "Impulse", "a single 1 at the middle sample"),
-    ("step", "Step", "0 for the first half, 1 for the second"),
     ("file", "From a file", ".npy, .csv, .txt or .tsv, one trace per column"),
 )
 
@@ -30,9 +25,6 @@ class SignalParams:
     duration_s: float = 4.0
     noise_sd: float = 0.3
     seed: int = 7
-    tones_hz: str = "4, 30, 120"
-    chirp_lo_hz: float = 1.0
-    chirp_hi_hz: float = 200.0
     path: str = ""
     column: int = 0
     zscore: bool = True
@@ -85,25 +77,12 @@ def make_signal(p: SignalParams) -> Signal:
     rng = np.random.default_rng(p.seed)
     if p.source == "jedi":
         return jedi3sub(p, rng)
-    t = np.arange(n) / p.fs
-    events = {}
-    if p.source == "spikes":
-        truth, events = spikes_and_bumps(t)
-    elif p.source == "tones":
-        truth = tones(t, parse_floats(p.tones_hz))
-    elif p.source == "chirp":
-        truth = chirp(t, p.chirp_lo_hz, p.chirp_hi_hz)
-    elif p.source == "impulse":
-        truth = np.zeros(n)
-        truth[n // 2] = 1.0
-    elif p.source == "step":
-        truth = (t >= t[-1] / 2).astype(float)
-    else:
+    if p.source != "spikes":
         raise ValueError(f"Unknown source {p.source!r}.")
-    name = dict((k, label) for k, label, _ in SOURCES)[p.source]
+    truth, events = spikes_and_bumps(np.arange(n) / p.fs)
     x = truth + p.noise_sd * rng.standard_normal(n)
     note = f"{n:,} samples at {p.fs:g} Hz, noise SD {p.noise_sd:g}"
-    return Signal(name=name, fs=p.fs, x=x, truth=truth, note=note, events_s=events)
+    return Signal(name="Spikes and bumps", fs=p.fs, x=x, truth=truth, note=note, events_s=events)
 
 
 def spike_shape(d: np.ndarray) -> np.ndarray:
@@ -135,28 +114,6 @@ def spikes_and_bumps(t: np.ndarray) -> tuple[np.ndarray, dict]:
     return y, {"spikes": spike_times[spike_times <= t[-1]]}
 
 
-def tones(t: np.ndarray, freqs: list[float]) -> np.ndarray:
-    """Unit sines, the k-th of len(freqs) on for its own stretch of the trace with a 50% overlap to its neighbors."""
-    if not freqs:
-        raise ValueError("Enter at least one frequency, e.g. 4, 30, 120.")
-    y = np.zeros_like(t)
-    duration = t[-1] if t[-1] > 0 else 1.0
-    span = duration / (len(freqs) + 1)
-    for k, f in enumerate(freqs):
-        on = (t >= k * span) & (t <= (k + 2) * span)
-        y += on * np.sin(2 * np.pi * f * t)
-    return y
-
-
-def chirp(t: np.ndarray, lo: float, hi: float) -> np.ndarray:
-    """A unit sine whose frequency climbs exponentially from lo to hi Hz over the trace."""
-    if not 0 < lo < hi:
-        raise ValueError("The chirp needs 0 < low < high.")
-    duration = t[-1] if t[-1] > 0 else 1.0
-    k = np.log(hi / lo) / duration
-    return np.sin(2 * np.pi * lo * (np.exp(k * t) - 1) / k)
-
-
 def jedi3sub(p: SignalParams, rng: np.random.Generator) -> Signal:
     """vnoiser's JEDI3sub simulation, sign-flipped (depolarization up) and z-scored the way the pipeline does."""
     from vnoiser import Jedi3SubConfig, simulate_jedi3sub_trace
@@ -169,19 +126,6 @@ def jedi3sub(p: SignalParams, rng: np.random.Generator) -> Signal:
     events = {name[:-2]: sim.events[name] for name in ("ap_times_s", "slow_depol_times_s", "ripple_times_s")}
     note = f"{x.size:,} samples at {p.fs:g} Hz, {len(sim.events['ap_times_s'])} APs"
     return Signal(name="JEDI3sub simulation", fs=p.fs, x=x, truth=truth, note=note, events_s=events)
-
-
-def parse_floats(text: str) -> list[float]:
-    """The positive numbers in text, e.g. "4, 30 120" -> [4.0, 30.0, 120.0]."""
-    out = []
-    for part in text.replace(",", " ").split():
-        try:
-            value = float(part)
-        except ValueError:
-            continue
-        if value > 0:
-            out.append(value)
-    return out
 
 
 def read_columns(path: Path) -> np.ndarray:

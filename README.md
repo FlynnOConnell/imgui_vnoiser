@@ -50,19 +50,13 @@ call to the clipboard.
 
 ## Things to try
 
-1. Impulse source, noise 0, Scalogram in Re W mode: each row shows its wavelet. Switch the wavelet to Narrowband
-   and the rows get longer.
-2. Chirp source: each row peaks when the chirp passes its center frequency. Rows above fs / 2 (yellow line) respond
-   only weakly.
-3. Compare the bands for Spikes and bumps vs JEDI3sub. Band edges change with the trace, and fast bands can
+1. Compare the bands for Spikes and bumps vs JEDI3sub. Band edges change with the trace, and fast bands can
    interleave.
-4. Sum of tones with a single tone (e.g. `20`) and noise 0. A sine peaks at 1.41 SD, below the 2 / 2.5 SD open
-   level, so its band opens no window and is dropped. The tone is missing from the reconstruction.
-5. The band-sum gain on the Frequency bands page is about 0.5 to 0.9, because each band averages its rows instead of
+2. The band-sum gain on the Frequency bands page is about 0.5 to 0.9, because each band averages its rows instead of
    summing them. Spikes in the reconstruction are smaller than in the ground truth.
-6. Switch masks from soft to hard: the floor drops to 0.05, removing more noise between events and more of the slow
+3. Switch masks from soft to hard: the floor drops to 0.05, removing more noise between events and more of the slow
    components.
-7. Untick bands on the Reconstruction page to see what each contributes.
+4. Untick bands on the Reconstruction page to see what each contributes.
 
 ## Layout
 
