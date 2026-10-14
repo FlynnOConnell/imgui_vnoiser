@@ -3,7 +3,7 @@
 ## Modules
 
 - `signals.py`: `SignalParams` (what the Signal page edits) and `make_signal`, returning a `Signal`: the trace,
-  its sampling rate, the clean trace when known, and event times to mark.
+  its sampling rate, the ground truth when known, and event times to mark.
 - `morlet.py`: pywt's `cmorB-C` written out in seconds and hertz: `wavelet_in_time`, `response` (the Gaussian
   frequency response of one row), `widths` (envelope SD, half-power band, Q, cycles), `bank_sum`, and `cwt`, which is
   exactly the call `Denoiser._cwt` makes.

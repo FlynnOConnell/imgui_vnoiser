@@ -382,7 +382,7 @@ STEPS = {
 
 
 def metrics(run: Run) -> dict:
-    """How the denoised trace compares with the raw one, and with the clean trace when known."""
+    """How the denoised trace compares with the raw one, and with the ground truth when known."""
     sig, out = run.signal, {}
     if run.denoised is None:
         return out
@@ -394,10 +394,10 @@ def metrics(run: Run) -> dict:
         if not run.settings.add_baseline:
             truth = truth - fir_lowpass(truth, sig.fs, run.settings.lp_cutoff, run.settings.fir_window_ms)
         # compare shapes: the denoiser does not promise the input's offset or gain
-        out["RMSE raw vs clean"] = float(np.sqrt(np.mean((x - x.mean() - (truth - truth.mean())) ** 2)))
-        out["RMSE denoised vs clean"] = float(np.sqrt(np.mean((y - y.mean() - (truth - truth.mean())) ** 2)))
-        out["corr raw vs clean"] = float(np.corrcoef(x, truth)[0, 1])
-        out["corr denoised vs clean"] = float(np.corrcoef(y, truth)[0, 1]) if np.std(y) > 0 else 0.0
+        out["RMSE raw vs ground truth"] = float(np.sqrt(np.mean((x - x.mean() - (truth - truth.mean())) ** 2)))
+        out["RMSE denoised vs ground truth"] = float(np.sqrt(np.mean((y - y.mean() - (truth - truth.mean())) ** 2)))
+        out["corr raw vs ground truth"] = float(np.corrcoef(x, truth)[0, 1])
+        out["corr denoised vs ground truth"] = float(np.corrcoef(y, truth)[0, 1]) if np.std(y) > 0 else 0.0
     return out
 
 

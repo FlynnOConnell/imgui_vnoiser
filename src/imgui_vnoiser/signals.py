@@ -1,5 +1,5 @@
 """
-Input traces for the window: synthetic ones with a known clean trace, test signals that show what the wavelet
+Input traces for the window: synthetic ones with a ground truth, test signals that show what the wavelet
 transform does (tones, a chirp, an impulse, a step), and traces read from a file.
 """
 
@@ -11,7 +11,7 @@ import numpy as np
 
 # the source key, its name in the Signal page's list, and the line under it
 SOURCES = (
-    ("spikes", "Spikes and bumps", "fast spikes riding on slow bumps, white noise on top; the clean trace is known"),
+    ("spikes", "Spikes and bumps", "spikes on slow Gaussian bumps, plus white noise"),
     ("jedi", "JEDI3sub simulation", "vnoiser.simulate_jedi3sub_trace: APs, bursts, PSPs, ripples and line-scan noise, sign-flipped and z-scored"),
     ("tones", "Sum of tones", "sines at chosen frequencies, each switching on for part of the trace"),
     ("chirp", "Chirp", "one sine sweeping from a low to a high frequency, log-spaced like the wavelet rows"),
@@ -47,7 +47,7 @@ class Signal:
         name (str): What the plots call it
         fs (float): Sampling rate in Hz
         x (np.ndarray): The trace the denoiser runs on
-        truth (np.ndarray | None): The clean trace in the same units, when known
+        truth (np.ndarray | None): Ground truth in the same units, when known
         note (str): One line about where it came from
         columns (int): How many columns the source file had
     """
@@ -88,22 +88,22 @@ def make_signal(p: SignalParams) -> Signal:
     t = np.arange(n) / p.fs
     events = {}
     if p.source == "spikes":
-        clean, events = spikes_and_bumps(t)
+        truth, events = spikes_and_bumps(t)
     elif p.source == "tones":
-        clean = tones(t, parse_floats(p.tones_hz))
+        truth = tones(t, parse_floats(p.tones_hz))
     elif p.source == "chirp":
-        clean = chirp(t, p.chirp_lo_hz, p.chirp_hi_hz)
+        truth = chirp(t, p.chirp_lo_hz, p.chirp_hi_hz)
     elif p.source == "impulse":
-        clean = np.zeros(n)
-        clean[n // 2] = 1.0
+        truth = np.zeros(n)
+        truth[n // 2] = 1.0
     elif p.source == "step":
-        clean = (t >= t[-1] / 2).astype(float)
+        truth = (t >= t[-1] / 2).astype(float)
     else:
         raise ValueError(f"Unknown source {p.source!r}.")
     name = dict((k, label) for k, label, _ in SOURCES)[p.source]
-    x = clean + p.noise_sd * rng.standard_normal(n)
+    x = truth + p.noise_sd * rng.standard_normal(n)
     note = f"{n:,} samples at {p.fs:g} Hz, noise SD {p.noise_sd:g}"
-    return Signal(name=name, fs=p.fs, x=x, truth=clean, note=note, events_s=events)
+    return Signal(name=name, fs=p.fs, x=x, truth=truth, note=note, events_s=events)
 
 
 def spike_shape(d: np.ndarray) -> np.ndarray:

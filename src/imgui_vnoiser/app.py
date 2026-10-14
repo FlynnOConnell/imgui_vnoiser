@@ -23,7 +23,7 @@ WIDTH_RAIL_EM = 26
 
 # the rail: a page key, its name, and the line under the name on its page
 PAGES = (
-    ("signal", "1  Signal", "the trace going in: synthetic with a known clean trace, a test signal, or your own"),
+    ("signal", "1  Signal", "input trace: synthetic (with ground truth), a test signal, or a file"),
     ("wavelet", "2  Morlet wavelet", "the filter every row of the transform applies, and how its scales tile frequency"),
     ("scalogram", "3  Scalogram", "the trace after the wavelet transform: one row per scale, one column per sample"),
     ("bands", "4  Frequency bands", "rows that rise and fall together are grouped: PCA, then Ward clustering"),
@@ -36,8 +36,9 @@ ABOUT = {
     "signal": (
         "vnoiser expects a z-scored dF/F trace with depolarization positive (JEDI fluorescence falls on "
         "depolarization, so the pipeline flips its sign).",
-        "Synthetic traces carry the clean trace they were made from (green), so Reconstruction can tell how much "
-        "of the noise was removed and how much of the signal went with it.",
+        "Synthetic sources have a ground truth (green): the trace before noise was added. For the JEDI3sub "
+        "simulation it is the indicator response without line-scan noise or AP artifacts. Reconstruction compares "
+        "the denoised trace against it.",
         "Tones, the chirp, the impulse and the step are for seeing the transform itself: an impulse shows each "
         "row's wavelet, a chirp shows the rows lighting up one after another.",
     ),
@@ -49,8 +50,8 @@ ABOUT = {
         "bands overlap heavily.",
         "Every row has the same shape on a log-frequency axis (constant Q): fast rows are short and wide in "
         "frequency, slow rows long and narrow.",
-        "Rows centered above fs / 2 (scale below 2 C) see frequencies the recording cannot hold; they respond "
-        "to the noise floor at the top of the band.",
+        "Rows centered above fs / 2 (scale below 2 C) have their center frequency above Nyquist; they only pick up "
+        "the lower tail of their band.",
     ),
     "scalogram": (
         "Each row is the trace filtered by one scaled wavelet. Its magnitude says how much of that frequency is "
@@ -65,8 +66,8 @@ ABOUT = {
         "observations (30 components). Rows whose envelopes rise and fall together land close in PC space.",
         "Ward clustering on the first 10 PC scores builds the tree; cutting it at 10 clusters gives the bands "
         "(sublabels). The 5-cluster cut is computed but not used.",
-        "Neighboring rows overlap a lot in frequency, so bands come out as contiguous frequency ranges. Their "
-        "edges move with the data: an event-rich trace gets different bands from a quiet one.",
+        "Neighboring rows overlap in frequency, so bands are usually contiguous ranges, but rows near and above "
+        "fs / 2 can interleave between bands. Band edges depend on the trace.",
         "The gain curve is what summing the bands back does to a sine with every mask at 1: each band averages "
         "its rows, so the sum passes less than the input (savgol smoothing lowers it further below 75 Hz).",
     ),
@@ -85,8 +86,8 @@ ABOUT = {
         "The masked bands are summed (rescaled_signal), and a zero-phase FIR low-pass of the input (1 Hz, 2 s "
         "Hamming) is added back as the baseline: denoised = rescaled_signal + baseline.",
         "The archive's denoised_trace_scans.pkl holds the sum without the baseline; untick Add baseline to see it.",
-        "Leave a band out to see what it carries. The spectrum shows which frequencies were removed: the floor "
-        "between events in every band, and whole bands that never opened a window.",
+        "Untick a band to remove it from the sum. The spectrum shows what was removed: the masked-down part of "
+        "each band between events, and any band that opened no window.",
     ),
 }
 
@@ -393,7 +394,7 @@ class App:
             hint(tip)
         heading("Shape")
         _, sp.fs = imgui.input_float("fs (Hz)", sp.fs, 100.0, 1000.0, "%.4g")
-        hint("The lab's line scans run at 1075.2688 Hz. Changing it changes every row's frequency, not the coefficients.")
+        hint("The lab's line scans run at 1075.2688 Hz. Row frequency is C fs / scale, so the same scales cover different Hz at a different fs.")
         if sp.source != "file":
             _, sp.duration_s = imgui.slider_float("duration (s)", sp.duration_s, 0.5, 120.0, "%.1f", imgui.SliderFlags_.logarithmic)
             if sp.source != "jedi":
@@ -418,7 +419,7 @@ class App:
                 _, value = imgui.slider_int("column", sp.column + 1, 1, columns)
                 sp.column = value - 1
             _, sp.zscore = imgui.checkbox("z-score", sp.zscore)
-            hint("vnoiser's thresholds are in SDs of each band, so scale matters little, but the 1 Hz baseline and the plots read in z.")
+            hint("Subtract the mean and divide by the SD. Band thresholds are in SDs of each band, so this mostly changes the y units.")
         sp.fs = max(sp.fs, 1.0)
 
     def page_signal(self) -> None:
@@ -427,7 +428,7 @@ class App:
         if self.begin_time_plot("Input trace", h, "z"):
             self.line("raw", sig.x, P.RAW)
             if sig.truth is not None:
-                self.line("clean", sig.truth, P.TRUTH, 1.5)
+                self.line("ground truth", sig.truth, P.TRUTH, 1.5)
             for i, (name, times) in enumerate(sig.events_s.items()):
                 P.vlines(name, times, P.band_color(i + 2, 0.45))
             implot.end_plot()
@@ -438,7 +439,7 @@ class App:
             implot.setup_axis_scale(implot.ImAxis_.y1, implot.Scale_.log10)
             implot.plot_line("raw", run.psd["f"], run.psd["raw"], P.spec(P.RAW))
             if "truth" in run.psd:
-                implot.plot_line("clean", run.psd["f"], run.psd["truth"], P.spec(P.TRUTH, 1.5))
+                implot.plot_line("ground truth", run.psd["f"], run.psd["truth"], P.spec(P.TRUTH, 1.5))
             P.vlines("fs / 2", [sig.fs / 2], P.DIM)
             implot.end_plot()
 
@@ -482,7 +483,7 @@ class App:
             imgui.same_line()
             imgui.text(value)
         if w.freq_hz > fs / 2:
-            imgui.text_colored(P.WARN, "Above fs / 2: this row sees no real signal.")
+            imgui.text_colored(P.WARN, "Center frequency is above fs / 2.")
         above = int(np.sum(s.c * fs / s.scales > fs / 2))
         if above:
             imgui.text_wrapped(f"{above} of {int(s.n_scales)} rows sit above fs / 2 = {fs / 2:g} Hz.")
@@ -647,10 +648,10 @@ class App:
             implot.end_plot()
         mid = float(np.sqrt(freqs.min() * min(freqs.max(), sig.fs / 2)))
         gain = morlet.bank_sum(run.settings.b, run.settings.c, run.scales, sig.fs, np.array([mid]))[0]
-        if self.begin_time_plot(f"Every row's real part summed (no bands, no masks): overlapping rows give a gain of about {gain:.2g}", -1):
+        if self.begin_time_plot(f"Sum of Re W / sqrt(scale) over all rows, no bands or masks (gain about {gain:.2g})", -1):
             self.line("input", sig.x, P.RAW)
             if sig.truth is not None:
-                self.line("clean", sig.truth, P.TRUTH)
+                self.line("ground truth", sig.truth, P.TRUTH)
             self.line("sum of Re W / sqrt(scale)", run.all_rows, P.ACCENT, 1.5)
             implot.end_plot()
 
@@ -924,7 +925,7 @@ class App:
                 imgui.text_disabled(f"{name:<24}")
                 imgui.same_line()
                 imgui.text(f"{value:.4g}")
-            hint_text = "RMSE compares shapes: each trace's mean is removed first. Without the baseline the clean trace loses its own 1 Hz low-pass too."
+            hint_text = "RMSE and correlation subtract each trace's mean first. With Add baseline off, the ground truth has its own 1 Hz low-pass removed before comparing."
             hint(hint_text)
 
     def page_final(self) -> None:
@@ -949,7 +950,7 @@ class App:
         if self.begin_time_plot("Denoised trace", h):
             self.line("raw", sig.x, P.RAW)
             if sig.truth is not None:
-                self.line("clean", sig.truth, P.TRUTH, 1.5)
+                self.line("ground truth", sig.truth, P.TRUTH, 1.5)
             if run.settings.add_baseline:
                 self.line("baseline (1 Hz FIR)", run.baseline, P.CLOSE, 1.0)
             self.line("denoised", run.denoised, P.ACCENT, 1.8)
@@ -969,7 +970,7 @@ class App:
             f = run.psd["f"]
             implot.plot_line("raw", f, run.psd["raw"], P.spec(P.RAW))
             if "truth" in run.psd:
-                implot.plot_line("clean", f, run.psd["truth"], P.spec(P.TRUTH, 1.5))
+                implot.plot_line("ground truth", f, run.psd["truth"], P.spec(P.TRUTH, 1.5))
             implot.plot_line("denoised", f, run.psd["denoised"] + 1e-30, P.spec(P.ACCENT, 1.8))
             implot.end_plot()
 
