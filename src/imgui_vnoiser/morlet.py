@@ -16,9 +16,9 @@ import pywt
 
 # a preset's name, B, C and why it is in the list
 PRESETS = (
-    ("vnoiser (cmor0.5-1.0)", 0.5, 1.0, "what Denoiser uses: about one cycle under the envelope, sharp in time, wide in frequency"),
-    ("Classic Morlet, w0 = 6", 2.0, 6 / (2 * np.pi), "the textbook Morlet: about 2 cycles"),
-    ("Narrowband (cmor8-1.5)", 8.0, 1.5, "many cycles: a narrow band-pass that smears events in time"),
+    ("vnoiser (cmor0.5-1.0)", 0.5, 1.0, "Denoiser default; 1.0 cycle within +-1 envelope SD"),
+    ("Classic Morlet, w0 = 6", 2.0, 6 / (2 * np.pi), "standard Morlet; 1.9 cycles within +-1 envelope SD"),
+    ("Narrowband (cmor8-1.5)", 8.0, 1.5, "6 cycles within +-1 envelope SD"),
 )
 
 

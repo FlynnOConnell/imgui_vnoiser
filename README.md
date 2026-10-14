@@ -52,7 +52,7 @@ call to the clipboard.
 
 1. Impulse source, noise 0, Scalogram in Re W mode: each row shows its wavelet. Switch the wavelet to Narrowband
    and the rows get longer.
-2. Chirp source: rows respond in sequence as the frequency sweeps. Rows above fs / 2 (yellow line) respond
+2. Chirp source: each row peaks when the chirp passes its center frequency. Rows above fs / 2 (yellow line) respond
    only weakly.
 3. Compare the bands for Spikes and bumps vs JEDI3sub. Band edges change with the trace, and fast bands can
    interleave.

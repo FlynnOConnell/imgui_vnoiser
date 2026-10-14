@@ -23,79 +23,73 @@ WIDTH_RAIL_EM = 26
 
 # the rail: a page key, its name, and the line under the name on its page
 PAGES = (
-    ("signal", "1  Signal", "input trace: synthetic (with ground truth), a test signal, or a file"),
-    ("wavelet", "2  Morlet wavelet", "the filter every row of the transform applies, and how its scales tile frequency"),
-    ("scalogram", "3  Scalogram", "the trace after the wavelet transform: one row per scale, one column per sample"),
-    ("bands", "4  Frequency bands", "rows that rise and fall together are grouped: PCA, then Ward clustering"),
-    ("events", "5  Events and masks", "each band's trace, the levels that open and close its windows, and its mask"),
-    ("final", "6  Reconstruction", "masked bands summed, the 1 Hz baseline added back, and what was removed"),
+    ("signal", "1  Signal", "input trace"),
+    ("wavelet", "2  Morlet wavelet", "wavelet shape and frequency response per scale"),
+    ("scalogram", "3  Scalogram", "CWT coefficients, one row per scale"),
+    ("bands", "4  Frequency bands", "PCA and Ward clustering of the CWT rows"),
+    ("events", "5  Events and masks", "band traces, event windows and masks"),
+    ("final", "6  Reconstruction", "sum of masked bands plus 1 Hz baseline"),
 )
 
 # what each page's "How it works" header says; numbers are the defaults, the controls show the current values
 ABOUT = {
     "signal": (
-        "vnoiser expects a z-scored dF/F trace with depolarization positive (JEDI fluorescence falls on "
-        "depolarization, so the pipeline flips its sign).",
-        "Synthetic sources have a ground truth (green): the trace before noise was added. For the JEDI3sub "
-        "simulation it is the indicator response without line-scan noise or AP artifacts. Reconstruction compares "
-        "the denoised trace against it.",
-        "Tones, the chirp, the impulse and the step are for seeing the transform itself: an impulse shows each "
-        "row's wavelet, a chirp shows the rows lighting up one after another.",
+        "Denoiser.run takes a z-scored dF/F trace. JEDI fluorescence decreases on depolarization, so the "
+        "pipeline multiplies it by -1 first.",
+        "Ground truth (green) is the synthetic trace before noise is added. For JEDI3sub it is dff_clean from "
+        "simulate_jedi3sub_trace, sign-flipped and divided by the SD of the observed trace.",
+        "Impulse: each CWT row equals the wavelet at that row's scale. Chirp: the frequency rises exponentially "
+        "from the low to the high value over the trace.",
     ),
     "wavelet": (
-        "pywt's complex Morlet cmorB-C is a sine at C cycles per sample under a Gaussian envelope exp(-t^2/B). "
-        "Stretching it by a scale s centers it on C fs / s Hz; vnoiser uses 100 scales log-spaced from 1 to 1000.",
-        "B trades time for frequency: a wider envelope (larger B) holds more cycles and passes a narrower band, "
-        "but smears an event over a longer time. vnoiser's cmor0.5-1.0 holds about one cycle: events stay sharp, "
-        "bands overlap heavily.",
-        "Every row has the same shape on a log-frequency axis (constant Q): fast rows are short and wide in "
-        "frequency, slow rows long and narrow.",
-        "Rows centered above fs / 2 (scale below 2 C) have their center frequency above Nyquist; they only pick up "
-        "the lower tail of their band.",
+        "pywt cmorB-C: psi(t) = exp(-t^2 / B) exp(2j pi C t) / sqrt(pi B). At scale s and sampling rate fs the "
+        "center frequency is C fs / s. Denoiser uses cmor0.5-1.0 and 100 scales log-spaced from 1 to 1000.",
+        "Envelope SD = sqrt(B / 2) s / fs seconds. Frequency response SD = fs / (pi sqrt(2 B) s) Hz. Larger B: "
+        "longer wavelet, narrower band.",
+        "Bandwidth divided by center frequency is the same for every row.",
+        "Rows with C fs / s above fs / 2 have their center frequency above Nyquist.",
     ),
     "scalogram": (
-        "Each row is the trace filtered by one scaled wavelet. Its magnitude says how much of that frequency is "
-        "present around each moment; its real part is the band-passed trace itself.",
-        "pywt's coefficients grow as sqrt(scale); vnoiser divides by it later, so the plots here do too.",
-        "A spike shows as a vertical streak (short in time, every fast row at once), a slow bump as a blob in the "
-        "low rows. Row-normalized color shows each row against its own noise level.",
-        "Standardized |W| is exactly what the clustering sees: each row minus its mean, over its SD, magnitude.",
+        "Row k of W is the trace convolved with the wavelet at scale k. |W| is the amplitude at that frequency "
+        "over time; Re W is the band-passed trace.",
+        "pywt's coefficients scale with sqrt(scale). Plots here divide by sqrt(scale), as AdaptiveThreshold does.",
+        "Row median mode divides each row by its median |W| over the whole trace.",
+        "Standardized |W| is the input to FrequencyClusterer: (W - row mean) / row SD, then absolute value.",
     ),
     "bands": (
-        "FrequencyClusterer standardizes each row over time, takes its magnitude and runs PCA with the rows as "
-        "observations (30 components). Rows whose envelopes rise and fall together land close in PC space.",
-        "Ward clustering on the first 10 PC scores builds the tree; cutting it at 10 clusters gives the bands "
-        "(sublabels). The 5-cluster cut is computed but not used.",
-        "Neighboring rows overlap in frequency, so bands are usually contiguous ranges, but rows near and above "
-        "fs / 2 can interleave between bands. Band edges depend on the trace.",
-        "The gain curve is what summing the bands back does to a sine with every mask at 1: each band averages "
-        "its rows, so the sum passes less than the input (savgol smoothing lowers it further below 75 Hz).",
+        "FrequencyClusterer: standardize each row over time, take the absolute value, run PCA with rows as "
+        "samples (30 components).",
+        "Ward linkage on the first 10 PC scores. fcluster with maxclust 10 gives the bands (sublabels). The "
+        "maxclust 5 result (labels) is computed but not used downstream.",
+        "Bands are usually contiguous in frequency. Rows near and above fs / 2 can be split between bands.",
+        "Gain curve: amplitude of the band sum for a unit sine with every mask at 1. Each band is the mean of its "
+        "rows, not the sum. Savgol smoothing of bands topping out at or below 75 Hz is not included.",
     ),
     "events": (
-        "WaveletReducer averages a band's rows into one trace (real part), smooths it with a running line fit "
-        "(savgol, 41 / 21 / 11 samples at 1075 Hz for bands topping out by 15 / 50 / 75 Hz) and rescales it to "
-        "its old peak.",
-        "Below 30 Hz a window opens when the trace rises through 2 SD and closes when it falls through 1 SD; "
-        "faster bands open at 2.5 SD and close at 0. A band with no window is dropped from the sum.",
-        "AdaptiveThreshold widens every window by the band's median window length times 2 (top <= 20 Hz), "
-        "1.5 (<= 50 Hz) or 0.5, sets the mask to 1 inside and to a floor outside (soft: 0.7 / 0.5 / 0.2 / 0.1 "
-        "by top frequency <5 / <30 / <80 / above; hard: 0.05), then blurs it with a Gaussian.",
-        "The band trace is divided by sqrt(its mean scale) and multiplied by its mask: that is what it adds.",
+        "WaveletReducer: band trace = mean of the band's rows (real part). Bands topping out at or below "
+        "15 / 50 / 75 Hz are smoothed with savgol order 1, window 41 / 21 / 11 samples at 1075 Hz, then scaled "
+        "back to the unsmoothed peak.",
+        "Bands topping out below 30 Hz: a window opens at 2 SD and closes at 1 SD. Other bands: open at 2.5 SD, "
+        "close at 0. A band with no windows is dropped.",
+        "AdaptiveThreshold: each window is extended on both sides by the band's median window length times 2 "
+        "(top <= 20 Hz), 1.5 (<= 50 Hz) or 0.5. Mask is 1 inside windows. Outside, soft masks use 0.7 / 0.5 / 0.2 "
+        "/ 0.1 for band tops < 5 / < 30 / < 80 Hz / above; hard masks use 0.05. The mask is then Gaussian "
+        "filtered.",
+        "The band's contribution is its trace / sqrt(mean scale) times the mask.",
     ),
     "final": (
-        "The masked bands are summed (rescaled_signal), and a zero-phase FIR low-pass of the input (1 Hz, 2 s "
-        "Hamming) is added back as the baseline: denoised = rescaled_signal + baseline.",
-        "The archive's denoised_trace_scans.pkl holds the sum without the baseline; untick Add baseline to see it.",
-        "Untick a band to remove it from the sum. The spectrum shows what was removed: the masked-down part of "
-        "each band between events, and any band that opened no window.",
+        "rescaled_signal = sum of the masked bands. Baseline = zero-phase FIR low-pass of the input, 1 Hz cutoff, "
+        "2 s Hamming window. Denoised = rescaled_signal + baseline.",
+        "denoised_trace_scans.pkl in the archive stores rescaled_signal without the baseline (Add baseline off).",
+        "Unticked bands are left out of the sum.",
     ),
 }
 
 HEAT_MODES = (
-    ("|W| / sqrt(scale), log", "how much of each frequency there is around each moment"),
-    ("|W| / row median, log", "each row against its own typical level: events stand out at every frequency"),
-    ("standardized |W|", "each row minus its mean, over its SD, magnitude: what PCA and the clustering see"),
-    ("Re W / sqrt(scale)", "the band-passed trace itself, signed; this is what gets summed back"),
+    ("|W| / sqrt(scale), log", "log10 amplitude"),
+    ("|W| / row median, log", "log10 of each row divided by its median over the trace"),
+    ("standardized |W|", "|W - row mean| / row SD, the input to the PCA"),
+    ("Re W / sqrt(scale)", "real part, the band-passed trace"),
 )
 
 
@@ -290,15 +284,15 @@ class App:
         imgui.separator()
         if imgui.button("Denoiser defaults"):
             self.settings.use_defaults()
-        hint("Every parameter back to vnoiser.Denoiser's constructor defaults; the signal stays.")
+        hint("Reset to Denoiser() defaults. Signal settings are kept.")
         same_line_if_fits("Denoiser.upstream (?)")
         if imgui.button("Denoiser.upstream"):
             self.settings.use_upstream()
-        hint("The spatial JEDI archive's settings: complex band traces above 75 Hz, soft floor 0.01 above 80 Hz, an even FIR tap count.")
+        hint("Denoiser.upstream: complex_bands=True, soft levels (0.7, 0.5, 0.2, 0.01), even FIR tap count.")
         if imgui.button("Copy as Python"):
             imgui.set_clipboard_text(self.settings.python())
             self.copied = "Denoiser call copied"
-        hint("A vnoiser.Denoiser(...) call with these settings, to run the same thing in a notebook.")
+        hint("Copies a vnoiser.Denoiser(...) call with these settings.")
         if self.copied:
             imgui.same_line()
             imgui.text_disabled(self.copied)
@@ -311,7 +305,7 @@ class App:
         if self.scale_edit is not None and not imgui.is_item_active():
             self.set_scale(self.scale_edit)
             self.scale_edit = None
-        hint("Ctrl + and Ctrl - change it too, Ctrl 0 goes back to the desktop's scale. Saved in ~/.imgui_vnoiser/settings.json.")
+        hint("Also Ctrl + / Ctrl -. Ctrl 0 resets to the detected scale. Saved in ~/.imgui_vnoiser/settings.json.")
 
     def draw_page(self) -> None:
         key, label, line = next(p for p in PAGES if p[0] == self.page)
@@ -338,7 +332,7 @@ class App:
             return
         sig = self.run.signal
         imgui.text_disabled(f"View {self.t0.value:.3f} to {self.t1.value:.3f} s of {sig.duration:.2f} s")
-        hint("Every time plot shares this window. Drag a plot to pan, scroll to zoom, double-click to fit it.")
+        hint("All time plots share this x range. Drag to pan, scroll to zoom, double-click to fit.")
         for label, span in (("Whole trace", sig.duration), ("4 s", 4.0), ("1 s", 1.0), ("200 ms", 0.2)):
             imgui.same_line()
             if imgui.small_button(label):
@@ -394,7 +388,7 @@ class App:
             hint(tip)
         heading("Shape")
         _, sp.fs = imgui.input_float("fs (Hz)", sp.fs, 100.0, 1000.0, "%.4g")
-        hint("The lab's line scans run at 1075.2688 Hz. Row frequency is C fs / scale, so the same scales cover different Hz at a different fs.")
+        hint("Line scans: 1075.2688 Hz. Row frequency = C fs / scale.")
         if sp.source != "file":
             _, sp.duration_s = imgui.slider_float("duration (s)", sp.duration_s, 0.5, 120.0, "%.1f", imgui.SliderFlags_.logarithmic)
             if sp.source != "jedi":
@@ -405,7 +399,7 @@ class App:
                 sp.seed += 1
         if sp.source == "tones":
             _, sp.tones_hz = imgui.input_text("tones (Hz)", sp.tones_hz)
-            hint("Comma separated. Each tone is on for its own stretch, overlapping its neighbors by half.")
+            hint("Frequencies in Hz, comma separated.")
         if sp.source == "chirp":
             _, sp.chirp_lo_hz = imgui.input_float("from (Hz)", sp.chirp_lo_hz, 0, 0, "%.3g")
             _, sp.chirp_hi_hz = imgui.input_float("to (Hz)", sp.chirp_hi_hz, 0, 0, "%.3g")
@@ -419,7 +413,7 @@ class App:
                 _, value = imgui.slider_int("column", sp.column + 1, 1, columns)
                 sp.column = value - 1
             _, sp.zscore = imgui.checkbox("z-score", sp.zscore)
-            hint("Subtract the mean and divide by the SD. Band thresholds are in SDs of each band, so this mostly changes the y units.")
+            hint("Subtract the mean, divide by the SD.")
         sp.fs = max(sp.fs, 1.0)
 
     def page_signal(self) -> None:
@@ -455,7 +449,7 @@ class App:
                 s.b, s.c = b, c
             hint(tip)
         _, s.b = imgui.slider_float("B (bandwidth)", s.b, 0.1, 20.0, "%.3g", imgui.SliderFlags_.logarithmic)
-        hint("Envelope exp(-t^2 / B): larger B, longer wavelet, narrower band.")
+        hint("Envelope exp(-t^2 / B). Larger B: longer wavelet, narrower band.")
         _, s.c = imgui.slider_float("C (center)", s.c, 0.2, 4.0, "%.3g")
         hint("Cycles per sample at scale 1. Row frequency = C fs / scale.")
         imgui.text_disabled(f"pywt name: {morlet.name(s.b, s.c)}")
@@ -486,7 +480,7 @@ class App:
             imgui.text_colored(P.WARN, "Center frequency is above fs / 2.")
         above = int(np.sum(s.c * fs / s.scales > fs / 2))
         if above:
-            imgui.text_wrapped(f"{above} of {int(s.n_scales)} rows sit above fs / 2 = {fs / 2:g} Hz.")
+            imgui.text_wrapped(f"{above} of {int(s.n_scales)} rows are above fs / 2 = {fs / 2:g} Hz.")
 
     def page_wavelet(self) -> None:
         s = self.settings
@@ -499,7 +493,7 @@ class App:
         if P.begin_plot("The wavelet at this row", imgui.ImVec2(half, h)):
             implot.setup_axes("time (ms)", "", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
             ms = t * 1000
-            implot.plot_line("real (what gets summed)", ms, np.ascontiguousarray(psi.real), P.spec(P.ACCENT, 2))
+            implot.plot_line("real", ms, np.ascontiguousarray(psi.real), P.spec(P.ACCENT, 2))
             implot.plot_line("imaginary", ms, np.ascontiguousarray(psi.imag), P.spec(P.OPEN, 1))
             implot.plot_line("envelope", ms, np.abs(psi), P.spec(P.DIM, 1))
             implot.plot_line("##-envelope", ms, -np.abs(psi), P.spec(P.DIM, 1))
@@ -507,7 +501,7 @@ class App:
             P.vlines("+-1 SD", [-sd, sd], P.faded(P.DIM, 0.5))
             implot.end_plot()
         imgui.same_line()
-        if P.begin_plot("Time-frequency tiles (+-1 SD) of every 10th row", imgui.ImVec2(-1, h)):
+        if P.begin_plot("+-1 SD in time and frequency, every 10th row", imgui.ImVec2(-1, h)):
             implot.setup_axes("time (ms)", "frequency (Hz)", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
             implot.setup_axis_scale(implot.ImAxis_.y1, implot.Scale_.log10)
             for k in list(range(0, len(scales), 10)) + [self.row]:
@@ -556,10 +550,10 @@ class App:
             w = morlet.widths(run.settings.b, run.settings.c, float(run.scales[self.row]), run.signal.fs)
             imgui.text_disabled(f"{w.freq_hz:.4g} Hz, scale {run.scales[self.row]:.3g}")
             imgui.text_disabled(f"envelope SD {w.sigma_t_s * 1000:.3g} ms")
-            imgui.text_disabled(f"passes {w.half_power_lo_hz:.3g} to {w.half_power_hi_hz:.3g} Hz at half power")
-            imgui.text_wrapped("Drag the white line on the scalogram, or this slider, to pick the row plotted below it.")
+            imgui.text_disabled(f"half-power band {w.half_power_lo_hz:.3g} to {w.half_power_hi_hz:.3g} Hz")
+            imgui.text_wrapped("Row plotted below the scalogram. Also set by dragging the white line.")
         heading("Wavelet")
-        imgui.text_wrapped(f"{morlet.name(self.settings.b, self.settings.c)}, {int(self.settings.n_scales)} rows. Change them on the Morlet wavelet page.")
+        imgui.text_wrapped(f"{morlet.name(self.settings.b, self.settings.c)}, {int(self.settings.n_scales)} rows. Set on the Morlet wavelet page.")
 
     def heat_matrix(self) -> tuple:
         """(values rows x columns, t_start, t_end, lo, hi) for the current view and color mode, cached."""
@@ -664,7 +658,7 @@ class App:
         n_rows = int(self.settings.n_scales)
         heading("PCA")
         _, c.standardize = imgui.checkbox("standardize rows", c.standardize)
-        hint("Subtract each row's mean and divide by its SD before taking the magnitude. Off, the slow rows' large coefficients dominate the PCA.")
+        hint("Subtract each row's mean and divide by its SD before the absolute value. Off: PCA runs on |W|.")
         _, c.n_components = imgui.slider_int("PCA components", c.n_components, 2, min(60, n_rows))
         _, c.n_comp_clu = imgui.slider_int("PCs clustered", c.n_comp_clu, 1, c.n_components)
         heading("Tree")
@@ -674,7 +668,7 @@ class App:
             c.method_linkage = methods[i]
         _, c.n_subclusters = imgui.slider_int("bands (sublabels)", c.n_subclusters, 2, min(30, n_rows - 1))
         _, c.n_clusters = imgui.slider_int("coarse clusters", c.n_clusters, 2, min(30, n_rows - 1))
-        hint("vnoiser computes this cut (labels) too but bands come from the sublabels.")
+        hint("Stored as labels; not used downstream. Bands come from sublabels.")
         c.n_comp_clu = min(c.n_comp_clu, c.n_components)
         if self.has("reduce"):
             heading("Bands")
@@ -804,13 +798,13 @@ class App:
         _, r.slow_upthres = imgui.slider_float("open SD, < 30 Hz", r.slow_upthres, 0.5, 6.0, "%.2f")
         hint("Close level is 1 SD for these bands.")
         _, r.fast_upthres = imgui.slider_float("open SD, >= 30 Hz", r.fast_upthres, 0.5, 6.0, "%.2f")
-        hint("Close level is 0 for these bands: a window ends when the trace crosses zero.")
+        hint("Close level is 0 for these bands.")
         changed, windows = imgui.input_int3("savgol windows", list(r.smooth_windows))
         if changed:
             r.smooth_windows = tuple(max(3, int(w)) for w in windows)
         hint(f"For bands topping out at <= 15, <= 50 and <= 75 Hz, in samples at {r.smooth_windows_fs:g} Hz; rescaled to the trace's rate, odd, at least 3.")
         _, r.complex_bands = imgui.checkbox("complex bands above 75 Hz", r.complex_bands)
-        hint("Denoiser.upstream keeps fast bands complex through the thresholds, as the archive was made.")
+        hint("Bands topping out above 75 Hz are thresholded as complex instead of real. On in Denoiser.upstream.")
         heading("Masks (AdaptiveThreshold)")
         kinds = ["soft", "hard"]
         changed, i = imgui.combo("type", kinds.index(t.thres_type), kinds)
@@ -824,17 +818,17 @@ class App:
             changed, sigmas = imgui.input_float2("blur SD", list(t.soft_sigma), "%.1f")
             if changed:
                 t.soft_sigma = tuple(max(0.1, v) for v in sigmas)
-            hint("Gaussian blur of the mask in samples, for bands topping out at or below 120 Hz, and above.")
+            hint("Gaussian sigma in samples, for bands topping out at or below 120 Hz, and above.")
         else:
             _, t.hard_floor = imgui.slider_float("floor", t.hard_floor, 0.0, 1.0, "%.3f")
             changed, sigmas = imgui.input_float2("blur SD", list(t.hard_sigma), "%.1f")
             if changed:
                 t.hard_sigma = tuple(max(0.1, v) for v in sigmas)
-        imgui.text_wrapped("Window widening (median window x 2 / 1.5 / 0.5 for bands topping at <= 20 / <= 50 Hz / above) is fixed in vnoiser.")
+        imgui.text_wrapped("Window extension (median window length x 2 / 1.5 / 0.5 for band tops <= 20 / <= 50 Hz / above) is hardcoded in AdaptiveThreshold.")
 
     def page_events(self) -> None:
         if not self.has("reduce"):
-            imgui.text_disabled("The bands have not been made.")
+            imgui.text_disabled("Bands not computed yet.")
             return
         run = self.run
         band = run.band(self.band_id)
@@ -856,14 +850,14 @@ class App:
             P.hline(f"close {band.down:.3g}", band.down, P.CLOSE, 1.0)
             implot.end_plot()
         if not band.kept:
-            imgui.text_colored(P.WARN, "No window opened in this band, so WaveletReducer drops it: it adds nothing to the sum.")
+            imgui.text_colored(P.WARN, "No windows. WaveletReducer drops this band.")
         elif band.mask is not None:
             if self.begin_time_plot(f"Mask: floor {band.floor:g}, windows widened {band.extra} samples, blur SD {band.sigma:g}", h * 0.7, y_fit=False):
                 implot.setup_axis_limits(implot.ImAxis_.y1, -0.05, 1.08, implot.Cond_.always)
                 self.line("before blur", band.label, P.faded(P.TEXT, 0.5))
                 self.line("mask", band.mask, color, 2)
                 implot.end_plot()
-            if self.begin_time_plot("What the band adds: trace / sqrt(mean scale), times the mask", h):
+            if self.begin_time_plot("Band contribution: trace / sqrt(mean scale) x mask", h):
                 self.line("unmasked", band.scaled.real, P.faded(P.TEXT, 0.35))
                 self.line("masked", band.masked.real, color, 1.5)
                 implot.end_plot()
@@ -901,7 +895,7 @@ class App:
         s = self.settings
         heading("Baseline")
         _, s.add_baseline = imgui.checkbox("Add baseline", s.add_baseline)
-        hint("Denoiser.run adds it; the archive's denoised_trace_scans.pkl did not.")
+        hint("Denoiser.run adds the baseline. The archive's denoised_trace_scans.pkl does not include it.")
         _, s.lp_cutoff = imgui.slider_float("cutoff (Hz)", s.lp_cutoff, 0.05, 20.0, "%.3g", imgui.SliderFlags_.logarithmic)
         _, s.fir_window_ms = imgui.slider_float("FIR window (ms)", s.fir_window_ms, 50.0, 10000.0, "%.0f", imgui.SliderFlags_.logarithmic)
         _, s.fir_odd_taps = imgui.checkbox("odd tap count", s.fir_odd_taps)

@@ -11,13 +11,13 @@ import numpy as np
 
 # the source key, its name in the Signal page's list, and the line under it
 SOURCES = (
-    ("spikes", "Spikes and bumps", "spikes on slow Gaussian bumps, plus white noise"),
-    ("jedi", "JEDI3sub simulation", "vnoiser.simulate_jedi3sub_trace: APs, bursts, PSPs, ripples and line-scan noise, sign-flipped and z-scored"),
-    ("tones", "Sum of tones", "sines at chosen frequencies, each switching on for part of the trace"),
-    ("chirp", "Chirp", "one sine sweeping from a low to a high frequency, log-spaced like the wavelet rows"),
-    ("impulse", "Impulse", "one sample at 1; every wavelet row shows the wavelet itself at that scale"),
-    ("step", "Step", "a jump from 0 to 1; shows what the slow rows and the 1 Hz baseline do with an edge"),
-    ("file", "From a file", ".npy, .csv, .txt or .tsv: one column per trace"),
+    ("spikes", "Spikes and bumps", "Gaussian bumps (60 to 180 ms) and spikes (3 SD, 4 ms decay), plus white noise; repeats every 4 s"),
+    ("jedi", "JEDI3sub simulation", "vnoiser.simulate_jedi3sub_trace, sign-flipped and z-scored"),
+    ("tones", "Sum of tones", "unit sines; tone k of n is on from k / (n + 1) to (k + 2) / (n + 1) of the trace"),
+    ("chirp", "Chirp", "unit sine, frequency rising exponentially from low to high"),
+    ("impulse", "Impulse", "a single 1 at the middle sample"),
+    ("step", "Step", "0 for the first half, 1 for the second"),
+    ("file", "From a file", ".npy, .csv, .txt or .tsv, one trace per column"),
 )
 
 
