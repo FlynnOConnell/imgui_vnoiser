@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "imgui_vnoiser"
+version = "0.1.0"
+description = "An imgui-bundle window for seeing what vnoiser's Morlet wavelet denoiser does to a trace, stage by stage."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Flynn OConnell", email = "flynnoconnell@gmail.com" }]
+keywords = ["imgui", "imgui-bundle", "implot", "wavelet", "morlet", "denoising", "voltage-imaging"]
+dependencies = [
+    "imgui-bundle>=1.92,<2",
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "PyWavelets>=1.4",
+    "vnoiser",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+imgui-vnoiser = "imgui_vnoiser.app:run"
+
+[tool.uv.sources]
+vnoiser = { path = "../vnoiser", editable = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
