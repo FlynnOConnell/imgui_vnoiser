@@ -39,11 +39,11 @@ NICE_HZ = (0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 
 
 
 def begin_plot(title: str, size: imgui.ImVec2, flags: int = 0) -> bool:
-    """implot.begin_plot with the legend in a row above the plot, so big text never covers the data."""
+    """implot.begin_plot with a one-row legend in the top left corner."""
     if not implot.begin_plot(title, size, flags):
         return False
     if not flags & implot.Flags_.no_legend:
-        implot.setup_legend(implot.Location_.north_west, implot.LegendFlags_.outside | implot.LegendFlags_.horizontal)
+        implot.setup_legend(implot.Location_.north_west, implot.LegendFlags_.horizontal)
     return True
 
 
@@ -93,6 +93,8 @@ def decimate(y: np.ndarray, fs: float, t0: float, t1: float, max_points: int = M
 def line(label: str, y: np.ndarray, fs: float, t0: float, t1: float, color: Optional[ImVec4] = None, weight: float = 1.0, flags: int = 0) -> None:
     """y against time, decimated to the view."""
     t, v = decimate(y, fs, t0, t1)
+    if v.size == 0:  # y ends before the view; ImPlot rejects an empty array
+        return
     implot.plot_line(label, t, v, spec(color, weight, flags=flags))
 
 

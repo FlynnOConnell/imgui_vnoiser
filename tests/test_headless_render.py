@@ -3,6 +3,7 @@ Draw every page for a few frames on hello_imgui's null backend: no window or GPU
 start here.
 """
 
+import numpy as np
 import pytest
 from imgui_bundle import hello_imgui, imgui, immapp
 
@@ -17,7 +18,7 @@ def enable_textures() -> None:
 
 
 class Driver:
-    """Waits for the first run, then visits every page; then the same for one more signal source."""
+    """Waits for the first run, then visits every page; then the same for each further source."""
 
     def __init__(self, app: App, sources):
         self.app = app
@@ -38,18 +39,18 @@ class Driver:
             if (app.settings.signal.source, app.page) not in self.seen:
                 self.seen.append((app.settings.signal.source, app.page))
         elif self.sources:
-            app.settings.signal.source = self.sources.pop(0)
+            app.settings.signal.source, app.settings.signal.path = self.sources.pop(0)
             self.frame = 0
         else:
             hello_imgui.get_runner_params().app_shall_exit = True
 
 
-@pytest.mark.parametrize("first, then", [("spikes", ["jedi"]), ("jedi", ["spikes"])])
-def test_every_page_renders(first, then):
+def test_every_page_renders(tmp_path):
+    trace = tmp_path / "trace.npy"
+    np.save(trace, np.random.default_rng(0).standard_normal(4000))
     app = App()
-    app.settings.signal.source = first
-    app.settings.signal.duration_s = 3.0
-    driver = Driver(app, then)
+    app.settings.signal.duration_s = 4.0
+    driver = Driver(app, [("file", str(trace))])
     params = runner_params(app)
     params.platform_backend_type = hello_imgui.PlatformBackendType.null
     params.renderer_backend_type = hello_imgui.RendererBackendType.null
@@ -64,5 +65,37 @@ def test_every_page_renders(first, then):
         raise
     app.executor.shutdown(wait=True)
     assert app.run.error == ""
-    assert [page for source, page in driver.seen if source == first] == [key for key, *_ in PAGES]
-    assert [page for source, page in driver.seen if source == then[0]] == [key for key, *_ in PAGES]
+    for source in ("lines", "file"):
+        assert [page for s, page in driver.seen if s == source] == [key for key, *_ in PAGES]
+
+
+def test_a_view_past_a_short_line_draws():
+    """The startup line on the first page ends at 1 s; a view after that must not hand ImPlot an empty array."""
+    app = App()
+    frames = [0]
+
+    def gui() -> None:
+        if app.ready and app.future is None:
+            app.t0.value, app.t1.value = 10.0, 11.0
+        app.gui()
+        if app.future is not None or not app.ready:
+            app.wait()
+            return
+        frames[0] += 1
+        if frames[0] > FRAMES_PER_PAGE:
+            hello_imgui.get_runner_params().app_shall_exit = True
+
+    params = runner_params(app)
+    params.platform_backend_type = hello_imgui.PlatformBackendType.null
+    params.renderer_backend_type = hello_imgui.RendererBackendType.null
+    params.ini_folder_type = hello_imgui.IniFolderType.temp_folder
+    params.callbacks.post_init = enable_textures
+    params.callbacks.show_gui = gui
+    try:
+        immapp.run(params, immapp.AddOnsParams(with_implot=True))
+    except Exception as e:
+        if "backend" in str(e).lower():
+            pytest.skip(f"null backend unavailable: {e}")
+        raise
+    app.executor.shutdown(wait=True)
+    assert frames[0] > FRAMES_PER_PAGE

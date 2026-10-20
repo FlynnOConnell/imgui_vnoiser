@@ -8,7 +8,7 @@ from imgui_vnoiser import Settings, compute, morlet
 from imgui_vnoiser.pipeline import STAGES
 
 
-def make(source="spikes", fs=1075.2688, duration=4.0, **edits) -> Settings:
+def make(source="lines", fs=1075.2688, duration=4.0, **edits) -> Settings:
     s = Settings()
     s.signal.source, s.signal.fs, s.signal.duration_s = source, fs, duration
     for key, value in edits.items():
@@ -28,7 +28,7 @@ def test_every_stage_runs(run):
 
 @pytest.mark.parametrize("upstream", [False, True])
 def test_matches_denoiser_run(upstream):
-    s = make(source="jedi")
+    s = make()
     if upstream:
         s.use_upstream()
     r = compute(s)
@@ -88,7 +88,7 @@ def test_a_bad_setting_reports_the_stage_and_recovers(run):
 
 
 def test_python_export_reproduces_the_run():
-    s = make(source="spikes")
+    s = make()
     s.b, s.c, s.n_scales = 2.0, 6 / (2 * np.pi), 60
     s.clust.n_subclusters = 7
     s.thres.soft_levels = (0.6, 0.4, 0.2, 0.05)
@@ -108,11 +108,3 @@ def test_morlet_response_matches_pywt():
     predicted = 0.5 * np.array([morlet.response(b, c, s, fs, f0) for s in scales])
     near = predicted > 0.05
     np.testing.assert_allclose(measured[near], predicted[near], rtol=0.06, atol=0.01)
-
-
-def test_widths_are_constant_q():
-    a = morlet.widths(0.5, 1.0, 10, 1000)
-    b = morlet.widths(0.5, 1.0, 100, 1000)
-    assert a.q == pytest.approx(b.q)
-    assert a.sigma_t_s * 10 == pytest.approx(b.sigma_t_s)
-    assert a.cycles == pytest.approx(1.0)

@@ -1,10 +1,11 @@
 """
-The window `imgui-vnoiser` opens: a rail of pages on the left, one per stage of vnoiser.Denoiser.run, with that
+The window `imgui-vnoiser` opens: a rail of pages on the left, one per step of the denoiser, with that
 stage's parameters under the rail and its plots on the right. Every time plot shares one time window, so zooming
 one zooms them all. The pipeline runs on a worker thread and reruns only the stages a change affects.
 """
 
 import math
+from pathlib import Path
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Optional
 
@@ -12,98 +13,40 @@ import numpy as np
 from imgui_bundle import hello_imgui, imgui, immapp, implot
 from imgui_bundle import portable_file_dialogs as pfd
 
-from imgui_vnoiser import __version__, config, morlet
+from imgui_vnoiser import __version__, config
 from imgui_vnoiser import plotting as P
 from imgui_vnoiser.pipeline import STAGES, Run, Settings, band_sum_gain, compute, fmt_hz, metrics
-from imgui_vnoiser.signals import SOURCES
+from imgui_vnoiser.signals import SOURCES, find_scans, scan_info
 
-TITLE_WINDOW = "vnoiser lab"
+TITLE_WINDOW = "vnoiser"
 SIZE_WINDOW = (1560, 980)
-WIDTH_RAIL_EM = 26
+WIDTH_RAIL_EM = 20
 
-# the rail: a page key, its name, and the line under the name on its page
+# the rail: a page key and its name
 PAGES = (
-    ("signal", "1  Signal", "input trace"),
-    ("wavelet", "2  Morlet wavelet", "wavelet shape and frequency response per scale"),
-    ("scalogram", "3  Scalogram", "CWT coefficients, one row per scale"),
-    ("bands", "4  Frequency bands", "PCA and Ward clustering of the CWT rows"),
-    ("events", "5  Events and masks", "band traces, event windows and masks"),
-    ("final", "6  Reconstruction", "sum of masked bands plus 1 Hz baseline"),
+    ("signal", "1  Line scan traces"),
+    ("scalogram", "2  Split by speed"),
+    ("bands", "3  Group into bands"),
+    ("events", "4  Keep events"),
+    ("final", "5  Add back"),
 )
 
-# what each page's "How it works" header says; numbers are the defaults, the controls show the current values
-ABOUT = {
-    "signal": (
-        "Denoiser.run takes a z-scored dF/F trace. JEDI fluorescence decreases on depolarization, so the "
-        "pipeline multiplies it by -1 first.",
-        "Spikes and bumps: 5 Gaussian bumps and 14 spikes at fixed times, repeating every 4 s, plus white noise. "
-        "Ground truth is the trace before the noise is added.",
-        "JEDI3sub: vnoiser.simulate_jedi3sub_trace. Simulated membrane voltage, converted to JEDI3sub dF/F with "
-        "the indicator's delay and kinetics, plus line-scan noise, motion, bleaching and AP artifacts. Ground "
-        "truth is dff_clean (no noise or artifacts), sign-flipped and divided by the SD of the observed trace.",
-    ),
-    "wavelet": (
-        "pywt cmorB-C: psi(t) = exp(-t^2 / B) exp(2j pi C t) / sqrt(pi B). At scale s and sampling rate fs the "
-        "center frequency is C fs / s. Denoiser uses cmor0.5-1.0 and 100 scales log-spaced from 1 to 1000.",
-        "Envelope SD = sqrt(B / 2) s / fs seconds. Frequency response SD = fs / (pi sqrt(2 B) s) Hz. Larger B: "
-        "longer wavelet, narrower band.",
-        "Bandwidth divided by center frequency is the same for every row.",
-        "Rows with C fs / s above fs / 2 have their center frequency above Nyquist.",
-    ),
-    "scalogram": (
-        "Row k of W is the trace convolved with the wavelet at scale k. |W| is the amplitude at that frequency "
-        "over time; Re W is the band-passed trace.",
-        "pywt's coefficients scale with sqrt(scale). Plots here divide by sqrt(scale), as AdaptiveThreshold does.",
-        "Row median mode divides each row by its median |W| over the whole trace.",
-        "Standardized |W| is the input to FrequencyClusterer: (W - row mean) / row SD, then absolute value.",
-    ),
-    "bands": (
-        "FrequencyClusterer: standardize each row over time, take the absolute value, run PCA with rows as "
-        "samples (30 components).",
-        "Ward linkage on the first 10 PC scores. fcluster with maxclust 10 gives the bands (sublabels). The "
-        "maxclust 5 result (labels) is computed but not used downstream.",
-        "Bands are usually contiguous in frequency. Rows near and above fs / 2 can be split between bands.",
-        "Gain curve: amplitude of the band sum for a unit sine with every mask at 1. Each band is the mean of its "
-        "rows, not the sum. Savgol smoothing of bands topping out at or below 75 Hz is not included.",
-    ),
-    "events": (
-        "WaveletReducer: band trace = mean of the band's rows (real part). Bands topping out at or below "
-        "15 / 50 / 75 Hz are smoothed with savgol order 1, window 41 / 21 / 11 samples at 1075 Hz, then scaled "
-        "back to the unsmoothed peak.",
-        "Bands topping out below 30 Hz: a window opens at 2 SD and closes at 1 SD. Other bands: open at 2.5 SD, "
-        "close at 0. A band with no windows is dropped.",
-        "AdaptiveThreshold: each window is extended on both sides by the band's median window length times 2 "
-        "(top <= 20 Hz), 1.5 (<= 50 Hz) or 0.5. Mask is 1 inside windows. Outside, soft masks use 0.7 / 0.5 / 0.2 "
-        "/ 0.1 for band tops < 5 / < 30 / < 80 Hz / above; hard masks use 0.05. The mask is then Gaussian "
-        "filtered.",
-        "The band's contribution is its trace / sqrt(mean scale) times the mask.",
-    ),
-    "final": (
-        "rescaled_signal = sum of the masked bands. Baseline = zero-phase FIR low-pass of the input, 1 Hz cutoff, "
-        "2 s Hamming window. Denoised = rescaled_signal + baseline.",
-        "denoised_trace_scans.pkl in the archive stores rescaled_signal without the baseline (Add baseline off).",
-        "Unticked bands are left out of the sum.",
-    ),
+# one line per page: what to check on it
+LOOK_FOR = {
+    "signal": "Look for: a bright stripe (the dendrite) in every line you include; lines without one only add noise. "
+              "A stripe that wanders is motion. The baseline should follow the slow decline (bleaching) and nothing faster.",
+    "scalogram": "Look for: events as bright vertical streaks. Spikes reach up into the fast rows, slow depolarizations "
+                 "stay low. Rows that are even speckle everywhere hold only noise; rows above the orange line always do.",
+    "bands": "Look for: bands that sit either on signal or on noise, not across both. In the spectrum, signal is where the "
+             "trace rises above the flat noise floor. In the bars, a fast band kept a large share of the time is letting "
+             "noise through.",
+    "events": "Look for: shaded windows on real events and not on noise. Many windows in noise: raise the threshold. "
+              "Events with no window: lower it.",
+    "final": "Look for: events kept in the denoised trace, and nothing event-shaped in 'removed'. Events in 'removed' "
+             "mean the denoiser is cutting signal.",
 }
 
-HEAT_MODES = (
-    ("|W| / sqrt(scale), log", "log10 amplitude"),
-    ("|W| / row median, log", "log10 of each row divided by its median over the trace"),
-    ("standardized |W|", "|W - row mean| / row SD, the input to the PCA"),
-    ("Re W / sqrt(scale)", "real part, the band-passed trace"),
-)
-
-
-def hint(text: str) -> None:
-    """A dim (?) after the previous item that shows text when hovered."""
-    imgui.same_line()
-    imgui.text_disabled("(?)")
-    if imgui.is_item_hovered():
-        imgui.begin_tooltip()
-        imgui.push_text_wrap_pos(imgui.get_font_size() * 30)
-        imgui.text_unformatted(text)
-        imgui.pop_text_wrap_pos()
-        imgui.end_tooltip()
+HEAT_MODES = ("amplitude", "amplitude / typical", "standardized", "real part")
 
 
 def same_line_if_fits(label: str) -> None:
@@ -143,11 +86,12 @@ class App:
         self.row = 40
         self.heat_mode = 1
         self.heat_cache = (None, None)
-        self.dendro_cache = (None, None)
+        self.pixel_cache = (None, None)
+        self.style_set = False
         self.band_id: Optional[int] = None
-        self.pc = [0, 1]
         self.preset = 0
         self.picker = None
+        self.scans: Optional[list] = None  # exported line scans found under ~/data
         self.copied = ""
 
     # ------------------------------------------------------------------
@@ -170,7 +114,10 @@ class App:
         if self.picker is not None and self.picker.ready():
             chosen = self.picker.result()
             self.picker = None
-            if chosen:
+            if chosen and chosen[0].endswith(".npz"):
+                self.settings.signal.scan_path = chosen[0]
+                self.settings.signal.source = "recorded"
+            elif chosen:
                 self.settings.signal.path = chosen[0]
                 self.settings.signal.source = "file"
 
@@ -187,7 +134,7 @@ class App:
 
     def fit_view(self) -> None:
         sig = self.run.signal
-        self.t0.value, self.t1.value = 0.0, min(sig.duration, 4.0)
+        self.t0.value, self.t1.value = 0.0, sig.duration if sig.lines is not None else min(sig.duration, 4.0)
 
     def check_selection(self) -> None:
         run = self.run
@@ -250,13 +197,29 @@ class App:
         elif imgui.is_key_pressed(imgui.Key._0) or imgui.is_key_pressed(imgui.Key.keypad0):
             self.set_scale(config.detect_scale())
 
+    def tighten_style(self) -> None:
+        """Smaller ImPlot padding than the defaults, so stacked plots leave more room for data. Once, at scale 1."""
+        ps = implot.get_style()
+        ps.plot_padding = imgui.ImVec2(4, 4)
+        ps.label_padding = imgui.ImVec2(3, 2)
+        ps.legend_padding = imgui.ImVec2(4, 2)
+        ps.legend_inner_padding = imgui.ImVec2(3, 1)
+        imgui.get_style().item_spacing = imgui.ImVec2(imgui.get_style().item_spacing.x, 3)
+        # black to green, like the green channel on the rig
+        ramp = np.linspace(0, 1, 32, dtype=np.float32)
+        cols = np.stack([0.15 * ramp**2, ramp, 0.25 * ramp**2, np.ones_like(ramp)], axis=1)
+        self.fluo_map = implot.add_colormap("fluorescence", cols, False)
+        self.style_set = True
+
     def gui(self) -> None:
+        if not self.style_set:
+            self.tighten_style()
         self.scale_keys()
         self.apply_scale()
         self.poll()
         em = imgui.get_font_size()
         # a third of the window, between 17 and 26 em: big text in a half-screen tile still leaves room for plots
-        rail = min(max(0.3 * imgui.get_content_region_avail().x, 17 * em), WIDTH_RAIL_EM * em)
+        rail = min(max(0.2 * imgui.get_content_region_avail().x, 15 * em), WIDTH_RAIL_EM * em)
         if imgui.begin_child("rail", imgui.ImVec2(rail, 0), imgui.ChildFlags_.borders):
             self.draw_rail()
         imgui.end_child()
@@ -270,7 +233,7 @@ class App:
         imgui.same_line()
         imgui.text_disabled(f"v{__version__}")
         imgui.spacing()
-        for key, label, _ in PAGES:
+        for key, label in PAGES:
             if imgui.selectable(label, self.page == key)[0]:
                 self.page = key
         imgui.spacing()
@@ -283,17 +246,15 @@ class App:
             imgui.pop_item_width()
         imgui.end_child()
         imgui.separator()
-        if imgui.button("Denoiser defaults"):
+        if imgui.button("defaults"):
             self.settings.use_defaults()
-        hint("Reset to Denoiser() defaults. Signal settings are kept.")
-        same_line_if_fits("Denoiser.upstream (?)")
-        if imgui.button("Denoiser.upstream"):
+        same_line_if_fits("lab settings")
+        if imgui.button("lab settings"):
             self.settings.use_upstream()
-        hint("Denoiser.upstream: complex_bands=True, soft levels (0.7, 0.5, 0.2, 0.01), even FIR tap count.")
-        if imgui.button("Copy as Python"):
+        same_line_if_fits("copy code")
+        if imgui.button("copy code"):
             imgui.set_clipboard_text(self.settings.python())
-            self.copied = "Denoiser call copied"
-        hint("Copies a vnoiser.Denoiser(...) call with these settings.")
+            self.copied = "copied"
         if self.copied:
             imgui.same_line()
             imgui.text_disabled(self.copied)
@@ -306,18 +267,13 @@ class App:
         if self.scale_edit is not None and not imgui.is_item_active():
             self.set_scale(self.scale_edit)
             self.scale_edit = None
-        hint("Also Ctrl + / Ctrl -. Ctrl 0 resets to the detected scale. Saved in ~/.imgui_vnoiser/settings.json.")
 
     def draw_page(self) -> None:
-        key, label, line = next(p for p in PAGES if p[0] == self.page)
-        imgui.text(label[3:])
-        imgui.same_line()
-        imgui.text_disabled(f"  {line}")
-        if imgui.collapsing_header("How it works"):
-            for paragraph in ABOUT[key]:
-                imgui.bullet()
-                imgui.text_wrapped(paragraph)
+        key = self.page
         self.draw_view_bar()
+        imgui.push_style_color(imgui.Col_.text, P.WARN)
+        imgui.text_wrapped(LOOK_FOR[key])
+        imgui.pop_style_color()
         imgui.separator()
         status_h = imgui.get_frame_height_with_spacing()
         if imgui.begin_child("plots", imgui.ImVec2(0, -status_h)):
@@ -329,42 +285,39 @@ class App:
         self.draw_status()
 
     def draw_view_bar(self) -> None:
-        if not self.ready or self.page == "wavelet":
+        if not self.ready:
             return
         sig = self.run.signal
-        imgui.text_disabled(f"View {self.t0.value:.3f} to {self.t1.value:.3f} s of {sig.duration:.2f} s")
-        hint("All time plots share this x range. Drag to pan, scroll to zoom, double-click to fit.")
-        for label, span in (("Whole trace", sig.duration), ("4 s", 4.0), ("1 s", 1.0), ("200 ms", 0.2)):
-            imgui.same_line()
+        for i, (label, span) in enumerate((("all", sig.duration), ("4 s", 4.0), ("1 s", 1.0), ("200 ms", 0.2))):
+            if i:
+                imgui.same_line()
             if imgui.small_button(label):
-                center = 0.5 * (self.t0.value + self.t1.value) if label != "Whole trace" else sig.duration / 2
+                center = 0.5 * (self.t0.value + self.t1.value) if label != "all" else sig.duration / 2
                 span = min(span, sig.duration)
                 lo = float(np.clip(center - span / 2, 0, sig.duration - span))
                 self.t0.value, self.t1.value = lo, lo + span
 
     def draw_status(self) -> None:
         if self.future is not None:
-            imgui.text_colored(P.WARN, f"Computing {self.stage_running or '...'}")
+            imgui.text_colored(P.WARN, "...")
             imgui.same_line()
         run = self.run
-        if run is None:
-            return
-        if run.error:
+        if run is not None and run.error:
             imgui.text_colored(P.ERROR, run.error)
-            return
-        sig = run.signal
-        times = "  ".join(f"{k} {v * 1000:.0f} ms" for k, v in run.timing.items())
-        imgui.text_disabled(f"{sig.name}: {sig.note}.   {times}")
 
     # ------------------------------------------------------------------
     # plot frames
     # ------------------------------------------------------------------
 
-    def begin_time_plot(self, title: str, height: float, y_label: str = "", flags: int = 0, y_fit: bool = True) -> bool:
+    def begin_time_plot(self, title: str, height: float, y_label: str = "", flags: int = 0, y_fit: bool = True,
+                        x_axis: bool = True) -> bool:
+        """A plot against time on the shared x range; x_axis False hides the time ticks (for plots stacked above
+        another)."""
         if not P.begin_plot(title, imgui.ImVec2(-1, height), flags):
             return False
         y_flags = implot.AxisFlags_.auto_fit | implot.AxisFlags_.range_fit if y_fit else 0
-        implot.setup_axes("time (s)", y_label, 0, y_flags)
+        x_flags = 0 if x_axis else implot.AxisFlags_.no_tick_labels | implot.AxisFlags_.no_label
+        implot.setup_axes("time (s)" if x_axis else "", y_label, x_flags, y_flags)
         implot.setup_axis_links(implot.ImAxis_.x1, self.t0, self.t1)
         return True
 
@@ -383,20 +336,19 @@ class App:
     def controls_signal(self) -> None:
         sp = self.settings.signal
         heading("Source")
-        for key, label, tip in SOURCES:
+        for key, label, _ in SOURCES:
             if imgui.radio_button(label, sp.source == key):
                 sp.source = key
-            hint(tip)
+        if sp.source == "recorded":
+            self.controls_recorded()
+            return
         heading("Shape")
         _, sp.fs = imgui.input_float("fs (Hz)", sp.fs, 100.0, 1000.0, "%.4g")
-        hint("Line scans: 1075.2688 Hz. Row frequency = C fs / scale.")
         if sp.source != "file":
             _, sp.duration_s = imgui.slider_float("duration (s)", sp.duration_s, 0.5, 120.0, "%.1f", imgui.SliderFlags_.logarithmic)
             if sp.source != "jedi":
-                _, sp.noise_sd = imgui.slider_float("noise SD", sp.noise_sd, 0.0, 2.0, "%.2f")
-            imgui.text_disabled(f"seed {sp.seed}")
-            imgui.same_line()
-            if imgui.small_button("New noise draw"):
+                _, sp.noise_sd = imgui.slider_float("noise", sp.noise_sd, 0.0, 3.0, "%.2f")
+            if imgui.small_button("new noise"):
                 sp.seed += 1
         if sp.source == "file":
             _, sp.path = imgui.input_text("##path", sp.path)
@@ -408,13 +360,53 @@ class App:
                 _, value = imgui.slider_int("column", sp.column + 1, 1, columns)
                 sp.column = value - 1
             _, sp.zscore = imgui.checkbox("z-score", sp.zscore)
-            hint("Subtract the mean, divide by the SD.")
         sp.fs = max(sp.fs, 1.0)
+
+    def controls_recorded(self) -> None:
+        sp = self.settings.signal
+        heading("Scan")
+        if self.scans is None:
+            self.scans = find_scans()
+            if not sp.scan_path and self.scans:
+                sp.scan_path = self.scans[0]
+        names = [Path(f).parent.parent.name + " / " + Path(f).stem for f in self.scans]
+        current = self.scans.index(sp.scan_path) if sp.scan_path in self.scans else -1
+        changed, i = imgui.combo("##scan", current, names)
+        if changed:
+            sp.scan_path = self.scans[i]
+        if imgui.button("Browse...") and self.picker is None:
+            self.picker = pfd.open_file("Open an exported line scan", sp.scan_path or ".", ["line scans", "*.npz"])
+        if not sp.scan_path:
+            return
+        try:
+            info = scan_info(sp.scan_path)
+        except ValueError as e:
+            imgui.text_colored(P.ERROR, str(e))
+            return
+        fs, total = info["fs"], info["frames"] / info["fs"]
+        imgui.text_disabled(f"{info['unit']}  {fs:.0f} Hz  {total:.0f} s")
+        heading("Lines in the domain")
+        chosen = set(sp.rois)
+        for k, (roi, width) in enumerate(sorted(info["widths"].items())):
+            if k % 3:
+                imgui.same_line()
+            changed, on = imgui.checkbox(f"{roi} ({width} px)##roi{roi}", roi in chosen)
+            if changed:
+                chosen = chosen | {roi} if on else chosen - {roi}
+        if chosen:
+            sp.rois = tuple(sorted(chosen))
+        heading("Window")
+        sp.duration_s = float(min(sp.duration_s, total))
+        _, sp.duration_s = imgui.slider_float("length (s)", sp.duration_s, 1.0, total, "%.1f", imgui.SliderFlags_.logarithmic)
+        _, sp.start_s = imgui.slider_float("start (s)", sp.start_s, 0.0, max(total - sp.duration_s, 0.0), "%.1f")
 
     def page_signal(self) -> None:
         sig = self.run.signal
+        if sig.lines is not None:
+            self.draw_line_scan()
+            return
         h = self.plot_height(0.62)
-        if self.begin_time_plot("Input trace", h, "z"):
+        if self.begin_time_plot("trace", h, "z"):
             self.line("raw", sig.x, P.RAW)
             if sig.truth is not None:
                 self.line("ground truth", sig.truth, P.TRUTH, 1.5)
@@ -422,133 +414,102 @@ class App:
                 P.vlines(name, times, P.band_color(i + 2, 0.45))
             implot.end_plot()
         run = self.run
-        if run.psd and P.begin_plot("Power spectrum (Welch)", imgui.ImVec2(-1, -1)):
+        if run.psd and P.begin_plot("spectrum", imgui.ImVec2(-1, -1)):
             implot.setup_axes("frequency (Hz)", "power / Hz", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
             implot.setup_axis_scale(implot.ImAxis_.x1, implot.Scale_.log10)
             implot.setup_axis_scale(implot.ImAxis_.y1, implot.Scale_.log10)
             implot.plot_line("raw", run.psd["f"], run.psd["raw"], P.spec(P.RAW))
             if "truth" in run.psd:
                 implot.plot_line("ground truth", run.psd["f"], run.psd["truth"], P.spec(P.TRUTH, 1.5))
-            P.vlines("fs / 2", [sig.fs / 2], P.DIM)
+            P.vlines("fastest possible", [sig.fs / 2], P.DIM)
+            implot.end_plot()
+
+    def pixel_image(self) -> tuple:
+        """(rows x columns, t_start, t_end, lo, hi): the scan's pixels over the noiseless pixels, one blank row
+        between, averaged to about 1200 columns of the view."""
+        run = self.run
+        fs, ls = run.signal.fs, run.signal.lines
+        i0, i1 = P.window_indices(run.signal.n, fs, self.t0.value, self.t1.value)
+        key = (id(run), i0, i1)
+        if self.pixel_cache[0] == key:
+            return self.pixel_cache[1]
+        width = max(1, int(math.ceil((i1 - i0) / 1200)))
+        whole = max((i1 - i0) // width * width, 1)
+
+        def pooled(px):
+            m = px[:, i0:i0 + whole].astype(np.float64)
+            return m.reshape(m.shape[0], -1, width).mean(axis=2) if width > 1 else m
+
+        noisy = pooled(ls.pixels)
+        lo, hi = P.fit_scale(noisy, 1.0, 99.5)
+        if ls.clean_pixels is None:
+            m = noisy
+        else:
+            gap = np.full((1, noisy.shape[1]), np.nan)
+            m = np.vstack([noisy, gap, pooled(ls.clean_pixels)])  # heatmap row 0 is drawn at the top
+        value = (np.ascontiguousarray(np.nan_to_num(m, nan=lo)), i0 / fs, (i0 + whole) / fs, lo, hi)
+        self.pixel_cache = (key, value)
+        return value
+
+    def draw_line_scan(self) -> None:
+        sig = self.run.signal
+        ls = sig.lines
+        n_px = ls.pixels.shape[0]
+        clean = ls.clean_pixels is not None
+        name = "noisy" if clean else "recorded"
+        rows = 2 * n_px + 1 if clean else n_px
+        gap = imgui.get_style().item_spacing.y
+        avail = imgui.get_content_region_avail().y - 3 * gap
+        h_img, h = avail * 0.34, avail * 0.22
+        m, ta, tb, lo, hi = self.pixel_image()
+        implot.push_colormap(self.fluo_map)
+        if self.begin_time_plot("##pixels", h_img, "", implot.Flags_.no_legend, y_fit=False, x_axis=False):
+            implot.setup_axis_limits(implot.ImAxis_.y1, 0, rows, implot.Cond_.always)
+            ticks = [rows - n_px / 2, n_px / 2] if clean else [n_px / 2]
+            implot.setup_axis_ticks(implot.ImAxis_.y1, ticks, ["noisy", "noiseless"] if clean else [name], False)
+            implot.plot_heatmap("##px", m, lo, hi, "", implot.Point(ta, 0), implot.Point(tb, rows))
+            for k, (a, b) in enumerate(ls.edges):
+                for top in (rows, n_px) if clean else (rows,):  # the noisy block, then the clean one
+                    y0, y1 = top - b, top - a
+                    implot.plot_shaded(f"##line{k}{top}", np.array([ta, ta + 0.006 * (tb - ta)]),
+                                       np.full(2, float(y0)), np.full(2, float(y1)), P.spec(P.band_color(k), fill_alpha=1.0))
+            implot.end_plot()
+        implot.pop_colormap()
+        if self.begin_time_plot("##F", h, "counts", x_axis=False):
+            for k, mean in enumerate(ls.line_means):
+                self.line(ls.names[k] if k < len(ls.names) else f"line {k + 1}", mean, P.band_color(k, 0.6))
+            self.line("all pixels", ls.f, P.WHITE, 1.5)
+            if clean:
+                self.line("noiseless", ls.clean_f, P.TRUTH, 1.5)
+            self.line(f"baseline ({ls.sigma_s[0]:.1f} s)", ls.f_baseline, P.OPEN, 2)
+            implot.end_plot()
+        if self.begin_time_plot("##dfof", h, "dF/F", x_axis=False):
+            self.line(name, ls.dfof, P.RAW)
+            if clean:
+                self.line("noiseless", ls.clean_dfof, P.TRUTH, 1.5)
+            self.line(f"slower baseline ({ls.sigma_s[1]:.1f} s)", ls.dfof_baseline, P.OPEN, 2)
+            implot.end_plot()
+        if self.begin_time_plot("##z", -1, "z (flipped)"):
+            self.line(name, sig.x, P.ACCENT)
+            if sig.truth is not None:
+                self.line("noiseless", sig.truth, P.TRUTH, 1.5)
             implot.end_plot()
 
     # ------------------------------------------------------------------
-    # 2  wavelet
-    # ------------------------------------------------------------------
-
-    def controls_wavelet(self) -> None:
-        s = self.settings
-        heading("Wavelet")
-        for i, (label, b, c, tip) in enumerate(morlet.PRESETS):
-            if imgui.radio_button(label, math.isclose(s.b, b) and math.isclose(s.c, c)):
-                s.b, s.c = b, c
-            hint(tip)
-        _, s.b = imgui.slider_float("B (bandwidth)", s.b, 0.1, 20.0, "%.3g", imgui.SliderFlags_.logarithmic)
-        hint("Envelope exp(-t^2 / B). Larger B: longer wavelet, narrower band.")
-        _, s.c = imgui.slider_float("C (center)", s.c, 0.2, 4.0, "%.3g")
-        hint("Cycles per sample at scale 1. Row frequency = C fs / scale.")
-        imgui.text_disabled(f"pywt name: {morlet.name(s.b, s.c)}")
-        heading("Scales")
-        _, s.scale_min = imgui.slider_float("smallest", s.scale_min, 0.5, 50.0, "%.3g", imgui.SliderFlags_.logarithmic)
-        _, s.scale_max = imgui.slider_float("largest", s.scale_max, 10.0, 20000.0, "%.4g", imgui.SliderFlags_.logarithmic)
-        _, s.n_scales = imgui.slider_int("rows", s.n_scales, 12, 200)
-        s.scale_max = max(s.scale_max, s.scale_min * 1.5)
-        fs = s.signal.fs
-        imgui.text_disabled(f"rows span {fmt_hz(s.c * fs / s.scale_max)} to {fmt_hz(s.c * fs / s.scale_min)} Hz at fs {fs:g} Hz")
-        heading("Inspect")
-        _, self.row = imgui.slider_int("row", self.row, 0, int(s.n_scales) - 1)
-        self.row = int(np.clip(self.row, 0, int(s.n_scales) - 1))
-        scale = float(s.scales[self.row])
-        w = morlet.widths(s.b, s.c, scale, fs)
-        for name, value in (
-            ("scale", f"{scale:.3g}"),
-            ("center", f"{w.freq_hz:.4g} Hz"),
-            ("envelope SD", f"{w.sigma_t_s * 1000:.3g} ms"),
-            ("half-power band", f"{w.half_power_lo_hz:.3g} to {w.half_power_hi_hz:.3g} Hz"),
-            ("Q (f / bandwidth)", f"{w.q:.2f}  (every row)"),
-            ("cycles within +-1 SD", f"{w.cycles:.2f}"),
-        ):
-            imgui.text_disabled(f"{name:<22}")
-            imgui.same_line()
-            imgui.text(value)
-        if w.freq_hz > fs / 2:
-            imgui.text_colored(P.WARN, "Center frequency is above fs / 2.")
-        above = int(np.sum(s.c * fs / s.scales > fs / 2))
-        if above:
-            imgui.text_wrapped(f"{above} of {int(s.n_scales)} rows are above fs / 2 = {fs / 2:g} Hz.")
-
-    def page_wavelet(self) -> None:
-        s = self.settings
-        fs, scales = s.signal.fs, s.scales
-        scale = float(scales[self.row])
-        avail = imgui.get_content_region_avail()
-        half = (avail.x - imgui.get_style().item_spacing.x) / 2
-        h = max(14 * imgui.get_font_size(), avail.y * 0.48)
-        t, psi = morlet.wavelet_in_time(s.b, s.c, scale, fs)
-        if P.begin_plot("The wavelet at this row", imgui.ImVec2(half, h)):
-            implot.setup_axes("time (ms)", "", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
-            ms = t * 1000
-            implot.plot_line("real", ms, np.ascontiguousarray(psi.real), P.spec(P.ACCENT, 2))
-            implot.plot_line("imaginary", ms, np.ascontiguousarray(psi.imag), P.spec(P.OPEN, 1))
-            implot.plot_line("envelope", ms, np.abs(psi), P.spec(P.DIM, 1))
-            implot.plot_line("##-envelope", ms, -np.abs(psi), P.spec(P.DIM, 1))
-            sd = morlet.widths(s.b, s.c, scale, fs).sigma_t_s * 1000
-            P.vlines("+-1 SD", [-sd, sd], P.faded(P.DIM, 0.5))
-            implot.end_plot()
-        imgui.same_line()
-        if P.begin_plot("+-1 SD in time and frequency, every 10th row", imgui.ImVec2(-1, h)):
-            implot.setup_axes("time (ms)", "frequency (Hz)", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
-            implot.setup_axis_scale(implot.ImAxis_.y1, implot.Scale_.log10)
-            for k in list(range(0, len(scales), 10)) + [self.row]:
-                w = morlet.widths(s.b, s.c, float(scales[k]), fs)
-                if w.freq_hz > fs / 2 and k != self.row:
-                    continue
-                lo, hi = max(w.freq_hz - w.sigma_f_hz, w.freq_hz / 20), w.freq_hz + w.sigma_f_hz
-                ts = w.sigma_t_s * 1000
-                xs = np.array([-ts, ts, ts, -ts, -ts])
-                ys = np.array([lo, lo, hi, hi, lo])
-                color = P.ACCENT if k == self.row else P.faded(P.TEXT, 0.4)
-                implot.plot_line("selected row" if k == self.row else "##tile", xs, ys, P.spec(color, 2 if k == self.row else 1))
-            implot.end_plot()
-        f = np.logspace(np.log10(max(0.05, s.c * fs / scales.max() / 4)), np.log10(fs / 2), 600)
-        if P.begin_plot("Frequency response of every row", imgui.ImVec2(-1, -1)):
-            implot.setup_axes("frequency (Hz)", "gain", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
-            implot.setup_axis_scale(implot.ImAxis_.x1, implot.Scale_.log10)
-            implot.setup_axis(implot.ImAxis_.y2, "summed gain", implot.AxisFlags_.auto_fit | implot.AxisFlags_.opposite)
-            for k, sc in enumerate(scales):
-                if k % 2 == 0 and k != self.row:
-                    implot.plot_line("##row", f, morlet.response(s.b, s.c, sc, fs, f), P.spec(P.faded(P.TEXT, 0.25)))
-            implot.plot_line("selected row", f, morlet.response(s.b, s.c, scale, fs, f), P.spec(P.ACCENT, 2.5))
-            P.vlines("fs / 2", [fs / 2], P.WARN)
-            implot.set_axes(implot.ImAxis_.x1, implot.ImAxis_.y2)
-            implot.plot_line("every row summed (right axis)", f, morlet.bank_sum(s.b, s.c, scales, fs, f), P.spec(P.TRUTH, 2))
-            if self.has("reduce") and self.run.settings.first_change(s) not in ("signal", "cwt"):
-                implot.plot_line("bands summed (right axis)", f, band_sum_gain(self.run, f, include_all=True), P.spec(P.OPEN, 2))
-            implot.end_plot()
-
-    # ------------------------------------------------------------------
-    # 3  scalogram
+    # 2  scalogram
     # ------------------------------------------------------------------
 
     def controls_scalogram(self) -> None:
         heading("Color")
-        for i, (label, tip) in enumerate(HEAT_MODES):
+        for i, label in enumerate(HEAT_MODES):
             if imgui.radio_button(label, self.heat_mode == i):
                 self.heat_mode = i
-            hint(tip)
         heading("Row")
         n = self.run.coeff.shape[0] if self.has("cwt") else int(self.settings.n_scales)
         _, self.row = imgui.slider_int("row", self.row, 0, n - 1)
         self.row = int(np.clip(self.row, 0, n - 1))
         if self.has("cwt"):
-            run = self.run
-            w = morlet.widths(run.settings.b, run.settings.c, float(run.scales[self.row]), run.signal.fs)
-            imgui.text_disabled(f"{w.freq_hz:.4g} Hz, scale {run.scales[self.row]:.3g}")
-            imgui.text_disabled(f"envelope SD {w.sigma_t_s * 1000:.3g} ms")
-            imgui.text_disabled(f"half-power band {w.half_power_lo_hz:.3g} to {w.half_power_hi_hz:.3g} Hz")
-            imgui.text_wrapped("Row plotted below the scalogram. Also set by dragging the white line.")
-        heading("Wavelet")
-        imgui.text_wrapped(f"{morlet.name(self.settings.b, self.settings.c)}, {int(self.settings.n_scales)} rows. Set on the Morlet wavelet page.")
+            imgui.text(f"{self.run.freqs[self.row]:.4g} Hz")
 
     def heat_matrix(self) -> tuple:
         """(values rows x columns, t_start, t_end, lo, hi) for the current view and color mode, cached."""
@@ -605,7 +566,7 @@ class App:
         h = self.plot_height(0.5)
         cmap = implot.Colormap_.rd_bu if self.heat_mode == 3 else implot.Colormap_.viridis
         implot.push_colormap(cmap)
-        if self.begin_time_plot("Scalogram", h, "frequency (Hz)", implot.Flags_.no_legend, y_fit=False):
+        if self.begin_time_plot("##scalogram", h, "frequency (Hz)", implot.Flags_.no_legend, y_fit=False, x_axis=False):
             implot.setup_axis_limits(implot.ImAxis_.y1, bottom, top, implot.Cond_.always)
             P.hz_ticks(freqs.min(), freqs.max())
             implot.plot_heatmap("##W", m, lo, hi, "", implot.Point(ta, bottom), implot.Point(tb, top))
@@ -629,41 +590,29 @@ class App:
         # the selected row over the input
         k = self.row
         root = math.sqrt(run.scales[k])
-        rest = imgui.get_content_region_avail().y
-        if self.begin_time_plot(f"Row {k}: {freqs[k]:.4g} Hz", rest * 0.5):
-            self.line("input", sig.x, P.RAW)
-            self.line("Re W / sqrt(scale)", run.coeff[k].real / root, P.ACCENT, 1.5)
-            self.line("|W| / sqrt(scale)", run.amp[k], P.OPEN, 1.0)
-            implot.end_plot()
-        mid = float(np.sqrt(freqs.min() * min(freqs.max(), sig.fs / 2)))
-        gain = morlet.bank_sum(run.settings.b, run.settings.c, run.scales, sig.fs, np.array([mid]))[0]
-        if self.begin_time_plot(f"Sum of Re W / sqrt(scale) over all rows, no bands or masks (gain about {gain:.2g})", -1):
-            self.line("input", sig.x, P.RAW)
-            if sig.truth is not None:
-                self.line("ground truth", sig.truth, P.TRUTH)
-            self.line("sum of Re W / sqrt(scale)", run.all_rows, P.ACCENT, 1.5)
+        if self.begin_time_plot(f"one row: {freqs[k]:.4g} Hz (drag the white line to pick)", -1):
+            self.line("trace", sig.x, P.RAW)
+            self.line("this row", run.coeff[k].real / root, P.ACCENT, 1.5)
+            self.line("its envelope", run.amp[k], P.OPEN, 1.0)
             implot.end_plot()
 
     # ------------------------------------------------------------------
-    # 4  bands
+    # 3  bands
     # ------------------------------------------------------------------
 
     def controls_bands(self) -> None:
         c = self.settings.clust
         n_rows = int(self.settings.n_scales)
-        heading("PCA")
-        _, c.standardize = imgui.checkbox("standardize rows", c.standardize)
-        hint("Subtract each row's mean and divide by its SD before the absolute value. Off: PCA runs on |W|.")
+        heading("Compare rows")
+        _, c.standardize = imgui.checkbox("standardize", c.standardize)
         _, c.n_components = imgui.slider_int("PCA components", c.n_components, 2, min(60, n_rows))
-        _, c.n_comp_clu = imgui.slider_int("PCs clustered", c.n_comp_clu, 1, c.n_components)
+        _, c.n_comp_clu = imgui.slider_int("PCs used", c.n_comp_clu, 1, c.n_components)
         heading("Tree")
         methods = ["ward", "average", "complete", "single"]
         changed, i = imgui.combo("linkage", methods.index(c.method_linkage) if c.method_linkage in methods else 0, methods)
         if changed:
             c.method_linkage = methods[i]
-        _, c.n_subclusters = imgui.slider_int("bands (sublabels)", c.n_subclusters, 2, min(30, n_rows - 1))
-        _, c.n_clusters = imgui.slider_int("coarse clusters", c.n_clusters, 2, min(30, n_rows - 1))
-        hint("Stored as labels; not used downstream. Bands come from sublabels.")
+        _, c.n_subclusters = imgui.slider_int("bands", c.n_subclusters, 2, min(30, n_rows - 1))
         c.n_comp_clu = min(c.n_comp_clu, c.n_components)
         if self.has("reduce"):
             heading("Bands")
@@ -684,7 +633,7 @@ class App:
                     if band.kept:
                         imgui.text(str(len(band.windows)))
                     else:
-                        imgui.text_colored(P.WARN, "0, dropped")
+                        imgui.text_colored(P.WARN, "0")
                 imgui.end_table()
 
     def page_bands(self) -> None:
@@ -694,11 +643,9 @@ class App:
         run = self.run
         order = self.band_order()
         freqs = run.freqs
-        sub = run.cluster["sublabels"]
         avail = imgui.get_content_region_avail()
-        half = (avail.x - imgui.get_style().item_spacing.x) / 2
-        h1 = max(12 * imgui.get_font_size(), avail.y * 0.36)
-        if P.begin_plot("Bands over frequency, and the gain of summing them", imgui.ImVec2(-1, h1), implot.Flags_.no_legend):
+        h1 = max(8 * imgui.get_font_size(), avail.y * 0.28)
+        if P.begin_plot("which speeds each band holds, and how much of each speed comes back (white)", imgui.ImVec2(-1, h1), implot.Flags_.no_legend):
             implot.setup_axes("frequency (Hz)", "", implot.AxisFlags_.auto_fit, implot.AxisFlags_.no_tick_labels | implot.AxisFlags_.lock)
             implot.setup_axis_limits(implot.ImAxis_.y1, 0, 1.05, implot.Cond_.always)
             implot.setup_axis_scale(implot.ImAxis_.x1, implot.Scale_.log10)
@@ -711,71 +658,49 @@ class App:
                 implot.plot_shaded(f"{band.span}{'' if band.kept else ' (dropped)'}", xs, np.ones(2), 0.0, P.spec(P.band_color(order[band.id]), fill_alpha=alpha))
                 c = P.band_color(order[band.id])
                 implot.plot_scatter(f"##rows{band.id}", f, np.full(f.size, 0.5), P.marker(c, 3.5, P.faded(P.TEXT, 0.8)))
-            P.vlines("fs / 2", [run.signal.fs / 2], P.WARN)
+            P.vlines("fastest possible", [run.signal.fs / 2], P.WARN)
             if self.has("reduce"):
                 fx = np.logspace(np.log10(freqs.min()), np.log10(min(freqs.max(), run.signal.fs / 2)), 500)
                 implot.set_axes(implot.ImAxis_.x1, implot.ImAxis_.y2)
-                implot.plot_line("band sum gain, kept bands (right)", fx, band_sum_gain(run, fx), P.spec(P.WHITE, 2))
+                implot.plot_line("gain", fx, band_sum_gain(run, fx), P.spec(P.WHITE, 2))
             implot.end_plot()
-        h2 = imgui.get_content_region_avail().y * 0.5
-        pca = run.cluster["pca_coeff"]
-        n_pc = pca.shape[1]
-        if P.begin_plot("Rows in PC space (one point per row)", imgui.ImVec2(half, h2), implot.Flags_.no_legend):
-            px, py = (min(p, n_pc - 1) for p in self.pc)
-            implot.setup_axes(f"PC{px + 1}", f"PC{py + 1}", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
+        spectrum = run.psd if self.has("final") else None
+        h2 = imgui.get_content_region_avail().y * 0.55
+        if spectrum and P.begin_plot("the trace's spectrum, with the bands behind it", imgui.ImVec2(-1, h2)):
+            implot.setup_axes("frequency (Hz)", "power / Hz", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
+            implot.setup_axis_scale(implot.ImAxis_.x1, implot.Scale_.log10)
+            implot.setup_axis_scale(implot.ImAxis_.y1, implot.Scale_.log10)
+            f = spectrum["f"]
+            top = float(max(spectrum["raw"].max(), spectrum.get("truth", spectrum["raw"]).max())) * 2
+            low = float(min(spectrum["raw"].min(), spectrum["denoised"].min() + 1e-30))
+            ratio = math.sqrt(freqs[0] / freqs[1]) if len(freqs) > 1 else 1.0
             for band in run.bands:
-                rows = sub == band.id
-                implot.plot_scatter(band.span, pca[rows, px].astype(np.float64), pca[rows, py].astype(np.float64),
-                                    P.marker(P.band_color(order[band.id])))
-            if implot.is_plot_hovered():
-                mouse = implot.get_plot_mouse_pos()
-                d = (pca[:, px] - mouse.x) ** 2 + (pca[:, py] - mouse.y) ** 2
-                k = int(np.argmin(d))
-                imgui.set_tooltip(f"row {k}: {freqs[k]:.4g} Hz, band {fmt_hz(freqs[sub == sub[k]].min())} to {fmt_hz(freqs[sub == sub[k]].max())} Hz")
+                fb = freqs[band.rows]
+                xs = np.array([fb.min() / ratio, min(fb.max() * ratio, f.max())])
+                implot.plot_shaded(f"##bg{band.id}", xs, np.full(2, top), low,
+                                   P.spec(P.band_color(order[band.id]), fill_alpha=0.18 if band.kept else 0.05))
+            implot.plot_line("trace", f, spectrum["raw"], P.spec(P.RAW, 1.5))
+            if "truth" in spectrum:
+                implot.plot_line("ground truth", f, spectrum["truth"], P.spec(P.TRUTH, 1.5))
+            implot.plot_line("denoised", f, spectrum["denoised"] + 1e-30, P.spec(P.ACCENT, 1.5))
             implot.end_plot()
-        imgui.same_line()
-        if P.begin_plot("Explained variance", imgui.ImVec2(-1, h2)):
-            implot.setup_axes("component", "fraction", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
-            ex = run.cluster["explained"].astype(np.float64)
-            xs = np.arange(1, ex.size + 1, dtype=np.float64)
-            implot.plot_bars("each", xs, ex, 0.7, P.spec(P.ACCENT))
-            implot.plot_line("cumulative", xs, np.cumsum(ex), P.spec(P.OPEN, 2))
-            P.vlines("clustered", [run.settings.clust.n_comp_clu + 0.5], P.WARN)
-            implot.end_plot()
-        imgui.text_disabled("PC axes")
-        for i, name in enumerate(("x", "y")):
-            imgui.same_line()
-            imgui.set_next_item_width(7 * imgui.get_font_size())
-            _, value = imgui.slider_int(f"##pc{name}", self.pc[i] + 1, 1, n_pc, f"{name}: PC%d")
-            self.pc[i] = value - 1
-        self.draw_dendrogram(order, sub)
-
-    def draw_dendrogram(self, order: dict, sub: np.ndarray) -> None:
-        run = self.run
-        if self.dendro_cache[0] is not id(run):
-            d = run.dendro
-            leaves = np.asarray(d["leaves"])
-            segments = []
-            for xs, ys in zip(d["icoord"], d["dcoord"]):
-                k0, k1 = int(math.ceil((min(xs) - 5) / 10)), int(math.floor((max(xs) - 5) / 10))
-                bands = set(sub[leaves[k0:k1 + 1]].tolist())
-                segments.append((np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64), bands.pop() if len(bands) == 1 else None))
-            self.dendro_cache = (id(run), (segments, leaves))
-        segments, leaves = self.dendro_cache[1]
-        if P.begin_plot("Ward tree of the rows, cut into bands", imgui.ImVec2(-1, -1), implot.Flags_.no_legend):
-            implot.setup_axes("rows, in tree order", "merge distance", implot.AxisFlags_.auto_fit | implot.AxisFlags_.no_tick_labels, implot.AxisFlags_.auto_fit)
-            for xs, ys, band in segments:
-                color = P.band_color(order[band]) if band is not None and band in order else P.faded(P.TEXT, 0.6)
-                implot.plot_line("##seg", xs, ys, P.spec(color, 1.5))
-            P.hline("cut", run.cut_height, P.WARN)
-            if implot.is_plot_hovered():
-                mouse = implot.get_plot_mouse_pos()
-                k = int(np.clip(round((mouse.x - 5) / 10), 0, len(leaves) - 1))
-                imgui.set_tooltip(f"leaf {k}: row {leaves[k]}, {run.freqs[leaves[k]]:.4g} Hz")
+        if self.has("reduce") and P.begin_plot("share of the time each band is kept", imgui.ImVec2(-1, -1), implot.Flags_.no_legend):
+            n = run.signal.n
+            bands = run.bands
+            implot.setup_axes("", "kept (%)", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
+            implot.setup_axis_ticks(implot.ImAxis_.x1, [float(i) for i in range(len(bands))], [b.span for b in bands], False)
+            for i, band in enumerate(bands):
+                if band.label is not None:
+                    kept = float(np.mean(band.label >= 1.0)) * 100
+                else:
+                    kept = float(np.sum(band.windows[:, 1] - band.windows[:, 0])) / n * 100 if band.kept else 0.0
+                implot.plot_bars(f"##k{band.id}", np.array([float(i)]), np.array([kept]), 0.7,
+                                 P.spec(P.band_color(order[band.id]), fill_alpha=1.0 if band.kept else 0.3))
+                implot.plot_text(f"{len(band.windows) if band.kept else 0}", float(i), kept, imgui.ImVec2(0, -0.7 * imgui.get_font_size()))
             implot.end_plot()
 
     # ------------------------------------------------------------------
-    # 5  events and masks
+    # 4  events and masks
     # ------------------------------------------------------------------
 
     def controls_events(self) -> None:
@@ -786,40 +711,33 @@ class App:
             for band in reversed(self.run.bands):
                 imgui.color_button(f"##b{band.id}", P.band_color(order[band.id]), 0, imgui.ImVec2(0.8 * imgui.get_font_size(), 0.8 * imgui.get_font_size()))
                 imgui.same_line()
-                label = f"{band.span}" + (f"   {len(band.windows)} windows" if band.kept else "   dropped")
+                label = band.span if band.kept else f"{band.span}  (dropped)"
                 if imgui.selectable(f"{label}##{band.id}", self.band_id == band.id)[0]:
                     self.band_id = band.id
-        heading("Windows (WaveletReducer)")
-        _, r.slow_upthres = imgui.slider_float("open SD, < 30 Hz", r.slow_upthres, 0.5, 6.0, "%.2f")
-        hint("Close level is 1 SD for these bands.")
-        _, r.fast_upthres = imgui.slider_float("open SD, >= 30 Hz", r.fast_upthres, 0.5, 6.0, "%.2f")
-        hint("Close level is 0 for these bands.")
-        changed, windows = imgui.input_int3("savgol windows", list(r.smooth_windows))
+        heading("Threshold")
+        _, r.slow_upthres = imgui.slider_float("SD, < 30 Hz", r.slow_upthres, 0.5, 6.0, "%.2f")
+        _, r.fast_upthres = imgui.slider_float("SD, >= 30 Hz", r.fast_upthres, 0.5, 6.0, "%.2f")
+        changed, windows = imgui.input_int3("smoothing", list(r.smooth_windows))
         if changed:
             r.smooth_windows = tuple(max(3, int(w)) for w in windows)
-        hint(f"For bands topping out at <= 15, <= 50 and <= 75 Hz, in samples at {r.smooth_windows_fs:g} Hz; rescaled to the trace's rate, odd, at least 3.")
-        _, r.complex_bands = imgui.checkbox("complex bands above 75 Hz", r.complex_bands)
-        hint("Bands topping out above 75 Hz are thresholded as complex instead of real. On in Denoiser.upstream.")
-        heading("Masks (AdaptiveThreshold)")
+        _, r.complex_bands = imgui.checkbox("complex above 75 Hz", r.complex_bands)
+        heading("Turn down")
         kinds = ["soft", "hard"]
         changed, i = imgui.combo("type", kinds.index(t.thres_type), kinds)
         if changed:
             t.thres_type = kinds[i]
         if t.thres_type == "soft":
-            changed, levels = imgui.slider_float4("floors", list(t.soft_levels), 0.0, 1.0, "%.2f")
+            changed, levels = imgui.slider_float4("to", list(t.soft_levels), 0.0, 1.0, "%.2f")
             if changed:
                 t.soft_levels = tuple(levels)
-            hint("Mask value outside windows for bands topping out below 5, below 30, below 80 Hz, and above.")
-            changed, sigmas = imgui.input_float2("blur SD", list(t.soft_sigma), "%.1f")
+            changed, sigmas = imgui.input_float2("blur", list(t.soft_sigma), "%.1f")
             if changed:
                 t.soft_sigma = tuple(max(0.1, v) for v in sigmas)
-            hint("Gaussian sigma in samples, for bands topping out at or below 120 Hz, and above.")
         else:
-            _, t.hard_floor = imgui.slider_float("floor", t.hard_floor, 0.0, 1.0, "%.3f")
-            changed, sigmas = imgui.input_float2("blur SD", list(t.hard_sigma), "%.1f")
+            _, t.hard_floor = imgui.slider_float("to", t.hard_floor, 0.0, 1.0, "%.3f")
+            changed, sigmas = imgui.input_float2("blur", list(t.hard_sigma), "%.1f")
             if changed:
                 t.hard_sigma = tuple(max(0.1, v) for v in sigmas)
-        imgui.text_wrapped("Window extension (median window length x 2 / 1.5 / 0.5 for band tops <= 20 / <= 50 Hz / above) is hardcoded in AdaptiveThreshold.")
 
     def page_events(self) -> None:
         if not self.has("reduce"):
@@ -831,30 +749,35 @@ class App:
             return
         fs = run.signal.fs
         color = P.band_color(self.band_order()[band.id])
-        what = f"smoothed, savgol {band.smooth_window}" if band.smooth_window else "not smoothed (top above 75 Hz)"
-        h = self.plot_height(0.3)
-        if self.begin_time_plot(f"Band {band.span}: mean of its {int(band.rows.sum())} rows, {what}", h):
+        gap = imgui.get_style().item_spacing.y
+        h = max(6 * imgui.get_font_size(), (imgui.get_content_region_avail().y - 4 * gap) / 5)
+        if self.begin_time_plot(f"{band.span}: its {int(band.rows.sum())} rows, and their average", h, x_axis=False):
+            for k in np.flatnonzero(band.rows):
+                self.line("##row", run.coeff[k].real, P.faded(P.TEXT, 0.35))
+            self.line("average", band.average.real, color, 2)
+            implot.end_plot()
+        if self.begin_time_plot("where it sticks out", h, x_axis=False):
             if band.kept and band.extra:
                 wide = np.clip(band.windows + np.array([-band.extra, band.extra]), 0, run.signal.n)
                 P.shade_intervals(wide, fs, self.t0.value, self.t1.value, P.faded(color, 0.10))
             P.shade_intervals(band.windows, fs, self.t0.value, self.t1.value, P.faded(color, 0.22))
             if band.smooth_window:
-                self.line("band mean", band.average.real, P.faded(P.TEXT, 0.35))
-            self.line("thresholded trace", band.smoothed.real, color, 1.5)
-            P.hline(f"open {band.up:.3g}", band.up, P.OPEN, 1.5)
-            P.hline(f"close {band.down:.3g}", band.down, P.CLOSE, 1.0)
+                self.line("average", band.average.real, P.faded(P.TEXT, 0.35))
+            self.line("smoothed", band.smoothed.real, color, 1.5)
+            P.hline("start", band.up, P.OPEN, 1.5)
+            P.hline("end", band.down, P.CLOSE, 1.0)
             implot.end_plot()
         if not band.kept:
-            imgui.text_colored(P.WARN, "No windows. WaveletReducer drops this band.")
+            imgui.text_colored(P.WARN, "never sticks out: dropped")
         elif band.mask is not None:
-            if self.begin_time_plot(f"Mask: floor {band.floor:g}, windows widened {band.extra} samples, blur SD {band.sigma:g}", h * 0.7, y_fit=False):
+            if self.begin_time_plot("keep (1) or turn down", h, y_fit=False, x_axis=False):
                 implot.setup_axis_limits(implot.ImAxis_.y1, -0.05, 1.08, implot.Cond_.always)
-                self.line("before blur", band.label, P.faded(P.TEXT, 0.5))
+                self.line("unblurred", band.label, P.faded(P.TEXT, 0.5))
                 self.line("mask", band.mask, color, 2)
                 implot.end_plot()
-            if self.begin_time_plot("Band contribution: trace / sqrt(mean scale) x mask", h):
-                self.line("unmasked", band.scaled.real, P.faded(P.TEXT, 0.35))
-                self.line("masked", band.masked.real, color, 1.5)
+            if self.begin_time_plot("band x mask", h, x_axis=False):
+                self.line("before", band.scaled.real, P.faded(P.TEXT, 0.35))
+                self.line("after", band.masked.real, color, 1.5)
                 implot.end_plot()
         self.draw_mask_image()
 
@@ -874,7 +797,7 @@ class App:
         implot.push_colormap(implot.Colormap_.viridis)
         em = imgui.get_font_size()
         h = max(imgui.get_content_region_avail().y, (1.3 * nb + 5) * em)
-        if self.begin_time_plot("Every kept band's mask (fastest on top)", h, flags=implot.Flags_.no_legend, y_fit=False):
+        if self.begin_time_plot("every band's mask", h, flags=implot.Flags_.no_legend, y_fit=False):
             implot.setup_axis_limits(implot.ImAxis_.y1, 0, nb, implot.Cond_.always)
             implot.setup_axis_ticks(implot.ImAxis_.y1, [nb - k - 0.5 for k in range(nb)], [b.span for b in kept], False)
             implot.plot_heatmap("##masks", np.ascontiguousarray(m, dtype=np.float64), 0.0, 1.0, "",
@@ -883,39 +806,33 @@ class App:
         implot.pop_colormap()
 
     # ------------------------------------------------------------------
-    # 6  reconstruction
+    # 5  reconstruction
     # ------------------------------------------------------------------
 
     def controls_final(self) -> None:
         s = self.settings
-        heading("Baseline")
-        _, s.add_baseline = imgui.checkbox("Add baseline", s.add_baseline)
-        hint("Denoiser.run adds the baseline. The archive's denoised_trace_scans.pkl does not include it.")
-        _, s.lp_cutoff = imgui.slider_float("cutoff (Hz)", s.lp_cutoff, 0.05, 20.0, "%.3g", imgui.SliderFlags_.logarithmic)
-        _, s.fir_window_ms = imgui.slider_float("FIR window (ms)", s.fir_window_ms, 50.0, 10000.0, "%.0f", imgui.SliderFlags_.logarithmic)
-        _, s.fir_odd_taps = imgui.checkbox("odd tap count", s.fir_odd_taps)
+        heading("Slow part")
+        _, s.add_baseline = imgui.checkbox("add", s.add_baseline)
+        _, s.lp_cutoff = imgui.slider_float("below (Hz)", s.lp_cutoff, 0.05, 20.0, "%.3g", imgui.SliderFlags_.logarithmic)
         if self.has("mask"):
-            heading("Bands in the sum")
+            heading("Bands")
             order = self.band_order()
             excluded = set(s.excluded)
             for band in reversed(self.run.bands):
                 imgui.color_button(f"##f{band.id}", P.band_color(order[band.id]), 0, imgui.ImVec2(0.8 * imgui.get_font_size(), 0.8 * imgui.get_font_size()))
                 imgui.same_line()
                 if not band.kept:
-                    imgui.text_disabled(f"{band.span}  (dropped)")
+                    imgui.text_disabled(band.span)
                     continue
                 changed, on = imgui.checkbox(f"{band.span}##inc{band.id}", band.id not in excluded)
                 if changed:
                     excluded = excluded - {band.id} if on else excluded | {band.id}
             s.excluded = tuple(sorted(excluded))
         if self.has("final"):
-            heading("Numbers")
-            for name, value in metrics(self.run).items():
-                imgui.text_disabled(f"{name:<24}")
-                imgui.same_line()
-                imgui.text(f"{value:.4g}")
-            hint_text = "RMSE and correlation subtract each trace's mean first. With Add baseline off, the ground truth has its own 1 Hz low-pass removed before comparing."
-            hint(hint_text)
+            numbers = metrics(self.run)
+            if "corr denoised vs ground truth" in numbers:
+                heading("Match to ground truth")
+                imgui.text(f"before {numbers['corr raw vs ground truth']:.2f}   after {numbers['corr denoised vs ground truth']:.2f}")
 
     def page_final(self) -> None:
         if not self.has("final"):
@@ -928,7 +845,7 @@ class App:
         kept = [band for band in run.bands if band.kept and band.masked is not None]
         h = self.plot_height(0.33)
         spread = max((np.percentile(np.abs(b.masked.real), 99.5) for b in kept), default=1.0) * 2.2 or 1.0
-        if self.begin_time_plot("Each band's contribution, stacked (slowest at the bottom)", h, flags=implot.Flags_.no_legend, y_fit=False):
+        if self.begin_time_plot("each band, slowest at the bottom", h, flags=implot.Flags_.no_legend, y_fit=False, x_axis=False):
             implot.setup_axis(implot.ImAxis_.y1, None, implot.AxisFlags_.no_tick_labels)
             implot.setup_axis_limits(implot.ImAxis_.y1, -0.7 * spread, (len(kept) - 0.2) * spread, implot.Cond_.always)
             for k, band in enumerate(kept):
@@ -936,23 +853,23 @@ class App:
                 self.line(band.span, band.masked.real + k * spread, P.band_color(order[band.id], alpha), 1.2)
                 implot.plot_text(band.span, self.t0.value, k * spread, imgui.ImVec2(3 * imgui.get_font_size(), -0.6 * imgui.get_font_size()))
             implot.end_plot()
-        if self.begin_time_plot("Denoised trace", h):
+        if self.begin_time_plot("bands added together", h):
             self.line("raw", sig.x, P.RAW)
             if sig.truth is not None:
                 self.line("ground truth", sig.truth, P.TRUTH, 1.5)
             if run.settings.add_baseline:
-                self.line("baseline (1 Hz FIR)", run.baseline, P.CLOSE, 1.0)
+                self.line("slow part", run.baseline, P.CLOSE, 1.0)
             self.line("denoised", run.denoised, P.ACCENT, 1.8)
             implot.end_plot()
         avail = imgui.get_content_region_avail()
         half = (avail.x - imgui.get_style().item_spacing.x) / 2
-        if P.begin_plot("Removed: raw minus denoised", imgui.ImVec2(half, -1)):
+        if P.begin_plot("removed", imgui.ImVec2(half, -1)):
             implot.setup_axes("time (s)", "", 0, implot.AxisFlags_.auto_fit | implot.AxisFlags_.range_fit)
             implot.setup_axis_links(implot.ImAxis_.x1, self.t0, self.t1)
             self.line("removed", sig.x - run.denoised, P.faded(P.ERROR, 0.8))
             implot.end_plot()
         imgui.same_line()
-        if run.psd and P.begin_plot("Power spectrum", imgui.ImVec2(-1, -1)):
+        if run.psd and P.begin_plot("spectrum", imgui.ImVec2(-1, -1)):
             implot.setup_axes("frequency (Hz)", "power / Hz", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
             implot.setup_axis_scale(implot.ImAxis_.x1, implot.Scale_.log10)
             implot.setup_axis_scale(implot.ImAxis_.y1, implot.Scale_.log10)

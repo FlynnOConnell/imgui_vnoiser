@@ -4,9 +4,8 @@
 
 - `signals.py`: `SignalParams` (what the Signal page edits) and `make_signal`, returning a `Signal`: the trace,
   its sampling rate, the ground truth when known, and event times to mark.
-- `morlet.py`: pywt's `cmorB-C` written out in seconds and hertz: `wavelet_in_time`, `response` (the Gaussian
-  frequency response of one row), `widths` (envelope SD, half-power band, Q, cycles), `bank_sum`, and `cwt`, which is
-  exactly the call `Denoiser._cwt` makes.
+- `morlet.py`: pywt's `cmorB-C`: `name`, `response` (the Gaussian frequency response of one row, for the band
+  gain curve) and `cwt`, which is exactly the call `Denoiser._cwt` makes.
 - `pipeline.py`: `Settings` (every parameter, grouped by the stage it first affects; the cluster, reduce and mask
   groups are vnoiser's own `ClusteringConfig`, `cwtReducerConfig` and `thresConfig`), `compute`, `Run`, `Band`.
 - `plotting.py`: colors, `begin_plot` (legend above the plot), `decimate` / `line` for long traces,

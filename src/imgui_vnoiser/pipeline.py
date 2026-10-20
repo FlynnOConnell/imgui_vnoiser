@@ -13,7 +13,6 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Optional
 
 import numpy as np
-from scipy.cluster.hierarchy import dendrogram
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter, welch
 from vnoiser import (
@@ -83,7 +82,7 @@ class Settings:
         return copy.deepcopy(self)
 
     def use_upstream(self) -> None:
-        """Denoiser.upstream: the spatial JEDI archive's settings (complex fast bands, lab soft levels, even taps)."""
+        """Denoiser.upstream: the lab's original settings (complex fast bands, lab soft levels, even taps)."""
         self.reducer.complex_bands = True
         self.thres = thresConfig(thres_type="soft", soft_levels=UPSTREAM_SOFT_LEVELS)
         self.fir_odd_taps = False
@@ -171,11 +170,8 @@ class Run:
     freqs: Optional[np.ndarray] = None
     scales: Optional[np.ndarray] = None
     amp: Optional[np.ndarray] = None  # |coeff| / sqrt(scale), float32
-    all_rows: Optional[np.ndarray] = None  # sum over every row of Re(coeff) / sqrt(scale): no bands, no masks
     # cluster
     cluster: Optional[dict] = None
-    dendro: Optional[dict] = None
-    cut_height: float = 0.0
     # reduce
     bands: list = field(default_factory=list)
     reduced: Optional[dict] = None
@@ -222,11 +218,9 @@ def compute(settings: Settings, start: str = "signal", previous: Optional[Run] =
         reuse = STAGES.index(start)
         run.signal, run.timing = previous.signal, {k: v for k, v in previous.timing.items() if STAGES.index(k) < reuse}
         if reuse > 1:
-            run.coeff, run.freqs, run.scales, run.amp, run.all_rows = (
-                previous.coeff, previous.freqs, previous.scales, previous.amp, previous.all_rows,
-            )
+            run.coeff, run.freqs, run.scales, run.amp = previous.coeff, previous.freqs, previous.scales, previous.amp
         if reuse > 2:
-            run.cluster, run.dendro, run.cut_height = previous.cluster, previous.dendro, previous.cut_height
+            run.cluster = previous.cluster
         if reuse > 3:
             run.bands, run.reduced = [copy.copy(band) for band in previous.bands], previous.reduced
         if reuse > 4:
@@ -256,7 +250,6 @@ def step_cwt(run: Run) -> None:
     run.coeff, run.freqs = morlet.cwt(x, run.scales, run.signal.fs, s.b, s.c)
     root = np.sqrt(run.scales)[:, None]
     run.amp = (np.abs(run.coeff) / root).astype(np.float32)
-    run.all_rows = (run.coeff.real / root).sum(axis=0)
 
 
 def step_cluster(run: Run) -> None:
@@ -267,12 +260,6 @@ def step_cluster(run: Run) -> None:
     if clust.n_comp_clu > clust.n_components:
         raise ValueError(f"components clustered ({clust.n_comp_clu}) above PCA components ({clust.n_components})")
     run.cluster = FrequencyClusterer(run.coeff, run.freqs, config=clust).run()
-    z = run.cluster["Z"]
-    run.dendro = dendrogram(z, no_plot=True, labels=[fmt_hz(f) for f in run.freqs])
-    # the height maxclust cuts at for the bands (sublabels)
-    k = clust.n_subclusters if run.settings.reducer.cluster_label == "sublabels" else clust.n_clusters
-    k = int(np.clip(k, 2, len(z)))
-    run.cut_height = float((z[-k, 2] + z[-k + 1, 2]) / 2)
 
 
 def band_details(run: Run) -> list:

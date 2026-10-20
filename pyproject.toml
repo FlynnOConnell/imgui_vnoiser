@@ -34,3 +34,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]  # test the source, never an installed copy
