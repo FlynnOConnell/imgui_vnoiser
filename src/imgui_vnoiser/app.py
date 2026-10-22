@@ -33,16 +33,16 @@ PAGES = (
 
 # one line per page: what to check on it
 LOOK_FOR = {
-    "signal": "Look for: a bright stripe (the dendrite) in every line you include; lines without one only add noise. "
+    "signal": "a bright stripe (the dendrite) in every line you include; lines without one only add noise. "
               "A stripe that wanders is motion. The baseline should follow the slow decline (bleaching) and nothing faster.",
-    "scalogram": "Look for: events as bright vertical streaks. Spikes reach up into the fast rows, slow depolarizations "
+    "scalogram": "events as bright vertical streaks. Spikes reach up into the fast rows, slow depolarizations "
                  "stay low. Rows that are even speckle everywhere hold only noise; rows above the orange line always do.",
-    "bands": "Look for: bands that sit either on signal or on noise, not across both. In the spectrum, signal is where the "
+    "bands": "bands that sit either on signal or on noise, not across both. In the spectrum, signal is where the "
              "trace rises above the flat noise floor. In the bars, a fast band kept a large share of the time is letting "
              "noise through.",
-    "events": "Look for: shaded windows on real events and not on noise. Many windows in noise: raise the threshold. "
+    "events": "shaded windows on real events and not on noise. Many windows in noise: raise the threshold. "
               "Events with no window: lower it.",
-    "final": "Look for: events kept in the denoised trace, and nothing event-shaped in 'removed'. Events in 'removed' "
+    "final": "events kept in the denoised trace, and nothing event-shaped in 'removed'. Events in 'removed' "
              "mean the denoiser is cutting signal.",
 }
 
@@ -55,6 +55,12 @@ def same_line_if_fits(label: str) -> None:
     need = imgui.calc_text_size(label).x + 2 * imgui.get_style().frame_padding.x + imgui.get_style().item_spacing.x
     if room > need:
         imgui.same_line()
+
+
+def caption(text: str) -> None:
+    imgui.push_style_color(imgui.Col_.text, imgui.get_style_color_vec4(imgui.Col_.text_disabled))
+    imgui.text_wrapped(text)
+    imgui.pop_style_color()
 
 
 def heading(text: str) -> None:
@@ -589,11 +595,13 @@ class App:
         implot.pop_colormap()
         # the selected row over the input
         k = self.row
+        caption("Below: the trace, the selected row (the part of the trace moving at that speed), and its envelope, "
+                "the row's strength at each moment, traced over the row's peaks.")
         root = math.sqrt(run.scales[k])
         if self.begin_time_plot(f"one row: {freqs[k]:.4g} Hz (drag the white line to pick)", -1):
             self.line("trace", sig.x, P.RAW)
             self.line("this row", run.coeff[k].real / root, P.ACCENT, 1.5)
-            self.line("its envelope", run.amp[k], P.OPEN, 1.0)
+            self.line("envelope", run.amp[k], P.OPEN, 1.0)
             implot.end_plot()
 
     # ------------------------------------------------------------------
@@ -643,6 +651,8 @@ class App:
         run = self.run
         order = self.band_order()
         freqs = run.freqs
+        caption("Each colored block is a band, covering the rows (dots) it groups; faded blocks are dropped. The white line "
+                "is the gain of the kept bands summed: 1 passes a frequency unchanged, 0 removes it.")
         avail = imgui.get_content_region_avail()
         h1 = max(8 * imgui.get_font_size(), avail.y * 0.28)
         if P.begin_plot("which speeds each band holds, and how much of each speed comes back (white)", imgui.ImVec2(-1, h1), implot.Flags_.no_legend):
@@ -665,6 +675,9 @@ class App:
                 implot.plot_line("gain", fx, band_sum_gain(run, fx), P.spec(P.WHITE, 2))
             implot.end_plot()
         spectrum = run.psd if self.has("final") else None
+        if spectrum:
+            caption("Power at each frequency in the trace and the denoised trace, with each band shaded behind the "
+                    "frequencies it covers.")
         h2 = imgui.get_content_region_avail().y * 0.55
         if spectrum and P.begin_plot("the trace's spectrum, with the bands behind it", imgui.ImVec2(-1, h2)):
             implot.setup_axes("frequency (Hz)", "power / Hz", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
@@ -684,6 +697,8 @@ class App:
                 implot.plot_line("ground truth", f, spectrum["truth"], P.spec(P.TRUTH, 1.5))
             implot.plot_line("denoised", f, spectrum["denoised"] + 1e-30, P.spec(P.ACCENT, 1.5))
             implot.end_plot()
+        if self.has("reduce"):
+            caption("How much of the recording each band is kept for; the number on a bar is its event windows.")
         if self.has("reduce") and P.begin_plot("share of the time each band is kept", imgui.ImVec2(-1, -1), implot.Flags_.no_legend):
             n = run.signal.n
             bands = run.bands
