@@ -402,3 +402,16 @@ def band_sum_gain(run: Run, f_hz: np.ndarray, include_all: bool = False) -> np.n
         part = sum(np.sqrt(scale) * morlet.response(s.b, s.c, scale, run.signal.fs, f_hz) for scale in rows)
         gain += 0.5 * part / (rows.size * np.sqrt(band.mean_scale))
     return gain
+
+
+def noise_floor_hz(psd: dict, fs: float, over: float = 1.5) -> Optional[float]:
+    """
+    About where the input's spectrum meets its noise floor: the highest frequency whose power, smoothed over 5 bins,
+    is over x the floor (the median power above fs/4). Shot noise is white, so above this the input is noise.
+    None when no frequency rises that far.
+    """
+    f, p = psd["f"], psd["raw"]
+    floor = float(np.median(p[f >= fs / 4]))
+    smooth = np.convolve(p, np.ones(5) / 5, mode="same")
+    above = np.flatnonzero(smooth[f < fs / 4] > over * floor)
+    return float(f[above[-1]]) if above.size else None
