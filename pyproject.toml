@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "pillow"]  # pillow: scripts/screenshot.py
 
 [project.scripts]
 imgui-vnoiser = "imgui_vnoiser.app:run"
