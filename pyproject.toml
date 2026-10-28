@@ -14,6 +14,7 @@ authors = [{ name = "Flynn OConnell", email = "flynnoconnell@gmail.com" }]
 keywords = ["imgui", "imgui-bundle", "implot", "wavelet", "morlet", "denoising", "voltage-imaging"]
 dependencies = [
     "imgui-bundle>=1.92,<2",
+    "imgui-data-loader>=0.2.0",
     "numpy>=1.23",
     "scipy>=1.9",
     "PyWavelets>=1.4",

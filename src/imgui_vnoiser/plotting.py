@@ -9,19 +9,22 @@ from typing import Optional
 import numpy as np
 from imgui_bundle import imgui, implot
 
+from imgui_vnoiser import style
+
 ImVec4 = imgui.ImVec4
 
-ACCENT = ImVec4(0.40, 0.68, 1.00, 1.0)
-DIM = ImVec4(0.62, 0.62, 0.65, 1.0)
-TEXT = ImVec4(0.92, 0.92, 0.94, 1.0)
-RAW = ImVec4(0.60, 0.60, 0.66, 0.70)
-TRUTH = ImVec4(0.35, 0.85, 0.45, 1.0)
-WARN = ImVec4(1.0, 0.75, 0.3, 1.0)
-ERROR = ImVec4(1.0, 0.4, 0.4, 1.0)
-OK = ImVec4(0.40, 0.90, 0.40, 1.0)
-OPEN = ImVec4(1.00, 0.55, 0.30, 1.0)
-CLOSE = ImVec4(0.95, 0.85, 0.35, 1.0)
-WHITE = ImVec4(1, 1, 1, 0.85)
+ACCENT = style.vec4(style.ACCENT)
+DIM = style.vec4(style.DIM)
+TEXT = style.vec4(style.TEXT)
+WARN = style.vec4(style.WARN)
+ERROR = style.vec4(style.ERROR)
+INPUT = style.vec4(style.INPUT, 0.75)
+NOISELESS = style.vec4(style.NOISELESS)
+DENOISED = style.vec4(style.DENOISED)
+REMOVED = style.vec4(style.REMOVED, 0.85)
+BASELINE = style.vec4(style.BASELINE)
+LEVEL_UP = style.vec4(style.WARN)
+LEVEL_DOWN = style.vec4(style.DIM)
 
 # band colors, in band order from slowest to fastest
 BAND_COLORS = tuple(
