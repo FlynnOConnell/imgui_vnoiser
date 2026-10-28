@@ -1,54 +1,72 @@
 # imgui_vnoiser
 
-Interactive viewer for [vnoiser](https://github.com/FlynnOConnell/vnoiser)'s Morlet wavelet denoiser. Each page is
-one stage of `vnoiser.Denoiser.run`, with its parameters on the left and its plots on the right. Changing a
-parameter reruns that stage and the ones after it. The stages call vnoiser's classes directly, and the output
-matches `Denoiser.run` (`tests/test_pipeline.py`).
+A window that shows what [vnoiser](https://github.com/FlynnOConnell/vnoiser)'s Morlet wavelet denoiser does to a
+voltage trace, one stage per page:
 
-Built on [imgui-bundle](https://github.com/pthom/imgui_bundle) (ImGui + ImPlot).
+    denoised = sum over bands of (band x mask) + the input's slow part
 
-![Line scan traces](docs/pixels.png)
+Each page has its settings in the rail on the left and its plots on the right. Changing a setting reruns that stage
+and the ones after it. The stages call vnoiser's own classes, and the output matches `Denoiser.run`
+(`tests/test_pipeline.py`).
+
+The window is styled like the masknmf launcher and
+[imgui_lab4_interface](https://github.com/FlynnOConnell/imgui_lab4_interface): imgui-data-loader's shell, the same
+palette, Font Awesome icons.
+
+![Line scan traces: a simulated AOD line scan, noisy above noiseless, then F, dF/F and z](docs/signal.png)
 
 ## What vnoiser does
 
-In short: split the trace into slow-to-fast wiggles, group similar speeds into bands, keep each band where it
-clearly sticks out above its own noise and turn it down elsewhere, then add the bands back together. The details:
+It works on one trace at a time. The trace is z-scored dF/F of a domain, made by `vnoiser.preprocess.domain_zscore`:
 
-Per trace, 1-D, no spatial step.
+1. F: the mean of the domain's pixels
+2. dF/F = (F - baseline) / baseline, the baseline a Gaussian filter of F (sigma 1500 samples)
+3. the first 1000 samples, where the filters start up, set to the mean of the rest
+4. z = -(dF/F - a slower baseline, sigma 5000) / SD(dF/F); the sign flip makes depolarization positive
 
-**Input to `Denoiser.run`:** one float trace `(n_frames,)` plus `fs`. It is expected to be z-scored dF/F, made
-upstream by `vnoiser.preprocess.domain_zscore`:
-1. mean fluorescence over the domain's pixels
-2. dF/F = (F - baseline) / baseline, Gaussian baseline with sigma 1500 samples
-3. the first 1000 samples (filter start-up) replaced by the mean of the rest
-4. z = -(dF/F - slower Gaussian baseline, sigma 5000) / SD(dF/F)
+`Denoiser.run(z)` then:
 
-The sign flip makes depolarization positive.
+| step | what it does | page |
+|------|--------------|------|
+| transform | complex Morlet CWT (`cmor0.5-1.0`), 100 log-spaced scales from 1 to 1000 samples | Scalogram |
+| grouping | standardize each row, take its absolute value, PCA, Ward clustering into up to 10 bands | Bands |
+| bands | each band is the mean of its rows, savgol-smoothed at or below 75 Hz; a band with no event is dropped | Masks |
+| masks | an event opens where the band crosses 2 SD (2.5 at 30 Hz and up); the mask is 1 on events, a floor elsewhere (0.7, 0.5, 0.2, 0.1 from slow to fast), Gaussian-blurred | Masks |
+| sum | each band / sqrt(its mean scale) x its mask, added up, plus a 1 Hz zero-phase FIR low-pass of the input | Denoised |
 
-**Operations:**
-1. Complex Morlet CWT (`pywt.cwt`, `cmor0.5-1.0`), 100 log-spaced scales 1 to 1000 (fs down to fs/1000 Hz).
-2. Group the 100 rows into up to 10 frequency bands: standardize each row, take the absolute value, PCA, then Ward
-   clustering.
-3. Per band: mean of its rows (real part), savgol smoothing for bands at or below 75 Hz, then event windows by
-   threshold crossing (2 / 2.5 SD of the band trace). Bands with no events are dropped.
-4. Per band mask: 1 inside the (widened) windows, a floor outside (soft: 0.7 / 0.5 / 0.2 / 0.1 by band frequency),
-   Gaussian-smoothed.
-5. Sum of (band / sqrt(mean scale) x mask) over bands, plus a 1 Hz zero-phase FIR low-pass of the input.
+The output has the input's length and z units. It is not amplitude-preserving: a band averages its rows instead of
+summing them, so with every mask at 1 the sum passes about 0.5 to 0.9 of a sine between 10 and 200 Hz (the white
+curve on the Bands page), and between events each band is cut to its floor.
 
-**Output:** `denoised (n_frames,)`, the same length and time base as the input, plus event start indices.
+`Denoiser.upstream` holds the lab's original settings: bands above 75 Hz stay complex, and the floor above 80 Hz is
+0.01 instead of 0.1. **Defaults** and **Lab settings** at the bottom of the rail switch between the two; **Copy
+code** copies the Python for the current settings.
 
-**Two settings:** `Denoiser()` (the defaults above) or `Denoiser.upstream` (the lab's original settings: bands above
-75 Hz kept complex, a 0.01 floor above 80 Hz instead of 0.1). The buttons at the bottom of the left panel switch
-between them.
+## On the default scan
 
-**Scaling:** the output is in the input's z units, with no rescaling to match the input. It is not
-amplitude-preserving:
-- Each band is the mean (not the sum) of its rows, divided by sqrt(mean scale). For a sine with every mask at 1, this
-  passes about 0.5 to 0.9 of its amplitude between roughly 10 and 200 Hz, and less toward 1 Hz and 400 Hz
-  (defaults, fs 1075 Hz).
-- Between events, each band is multiplied by its floor (0.1 to 0.7).
-- Event peaks come back smaller than in the input.
-- The 1 Hz baseline is added at gain 1.
+The default input is a simulated AOD line scan: 3 lines across one dendrite, 40 px, 1075 Hz for 30 s, in raw counts
+with the file's offset left in, with bleaching, motion and shot noise. The same scan without noise or motion runs
+beside it.
+
+There, z correlates 0.28 with the noiseless z, and the denoised trace 0.59. The input's spectrum reaches its noise
+floor near 16 Hz. All 10 bands find events, but the 6 above 16 Hz find 893 of the 1002, and those are mostly noise
+crossing the threshold. A recorded scan (unit 30 of `turi/9_14_2026`, line 0, 1587 Hz) looks the same: the floor
+starts near 16 Hz, and the 6 bands above it find 917 of 1003 events.
+
+## Pages
+
+| page | shows |
+|------|-------|
+| [Line scan traces](docs/signal.png) | the scan's pixels, noisy above noiseless; F per line and for all pixels, with its baseline; dF/F with the slower baseline; z |
+| [Scalogram](docs/scalogram.png) | the transform, one row per frequency, with the band edges; one row against the input |
+| [Bands](docs/bands.png) | which rows each band holds and the gain of their sum; the spectrum with the bands behind it; how long each band is kept, and its events |
+| [Masks](docs/events.png) | one band: its rows and their mean, the thresholds and events, its mask, the band times its mask; every band's mask |
+| [Denoised](docs/final.png) | each masked band; the bands added up; what the denoiser took out; the spectra |
+
+Under the plots, a paragraph says what the page shows with this trace's numbers in it, and what to check.
+
+Every time plot shares one x range: drag to pan, scroll to zoom, double-click to fit, or use the buttons at the
+right of the page title.
 
 ## Install
 
@@ -62,6 +80,8 @@ uv venv -p 3.12 && uv pip install -e ".[dev]"
 imgui-vnoiser
 ```
 
+Install with `-e`: a plain `uv pip install .` copies the package, and later edits don't reach the window.
+
 ## Recorded line scans
 
 The window opens AOD line scans exported from a `.mesc`. The export needs mbo_utilities, so it runs in
@@ -72,53 +92,38 @@ cd ../pml_utilities
 uv run --no-sync python ../imgui_vnoiser/scripts/export_mesc_linescan.py ~/data/turi/9_14_2026/session1.mesc
 ```
 
-That writes `linescans/<unit>.npz` next to the file: every line's raw pixels (offset left in, as the voltage pipeline
-reads them). Scans under `~/data/**/linescans/` show up under "Recorded line scan"; pick the lines that make up the
-domain and a time window. The dF/F baselines are scaled to the scan's frame rate as mbo_utilities does.
+That writes `linescans/<unit>.npz` next to the file, with every line's raw pixels (offset left in, as the voltage
+pipeline reads them). Scans under `~/data/**/linescans/` are listed under Recorded line scan; tick the lines that
+make up the domain and pick a time window. The dF/F baselines are scaled to the scan's frame rate, as mbo_utilities
+does. From the command line: `imgui-vnoiser --scan ~/data/turi/9_14_2026/linescans/MSession_0_MUnit_30.npz --lines 0 1`.
 
 ## Text size
 
 GLFW reports a content scale of 1 under XWayland, so the desktop scale has no effect on the window. Set it in the
-app instead:
+app instead: Ctrl + and Ctrl - (Ctrl 0 resets), the text slider in the footer, or `imgui-vnoiser --scale 2`
+(`IMGUI_VNOISER_SCALE=2`). The last value is saved in `~/.imgui_vnoiser/settings.json`. With nothing saved, the
+default comes from `GDK_SCALE`, then Hyprland's monitor scale, then 1.
 
-- Ctrl + / Ctrl - to resize, Ctrl 0 to reset to the detected scale
-- the text size slider at the bottom of the left panel
-- `imgui-vnoiser --scale 2` or `IMGUI_VNOISER_SCALE=2`
+## Tests and screenshots
 
-The last value is saved in `~/.imgui_vnoiser/settings.json`. With nothing saved, the default comes from
-`GDK_SCALE`, then Hyprland's monitor scale, then 1.
-
-## Pages
-
-| page | shows |
-|------|-------|
-| 1 Line scan traces | a simulated AOD line scan (raw counts, offset left in, motion, bleaching, shot noise) next to the same scan without noise, at each step: pixels, averages, dF/F, the final trace |
-| 2 Split by speed | the trace split into rows, slow to fast; one row; all rows added back |
-| 3 Group into bands | which rows go in which band, and how the grouping is made |
-| 4 Keep events | a band's rows and their average, where it sticks out, its mask, every band's mask |
-| 5 Add back | each band after masking, the bands added together, what was removed |
-
-All time plots share one x range (drag to pan, scroll to zoom, double-click to fit). The buttons at the bottom of
-the left panel switch between vnoiser's defaults and the lab's settings, or copy the matching code.
-
-## Things to try
-
-1. Raise the noise on the first page and watch how far the file's trace drifts from the noiseless one.
-2. The gain curve on the Group into bands page is about 0.5 to 0.9 over most of the range, because each band
-   averages its rows instead of summing them. Events in the reconstruction are smaller than in the ground truth.
-3. Switch masks from soft to hard: the floor drops to 0.05, removing more noise between events and more of the slow
-   components.
-4. Untick bands on the Add back page to see what each contributes.
+```bash
+pytest                          # 21 tests, about 20 s; one draws every page on a null backend
+python scripts/screenshot.py    # docs/<page>.png; needs pillow
+imgui-vnoiser --page bands --screenshot bands.png
+```
 
 ## Layout
 
 | file | contents |
 |------|----------|
-| `src/imgui_vnoiser/signals.py` | synthetic line scan and traces, file loading |
+| `src/imgui_vnoiser/signals.py` | the simulated line scan, recorded scans, traces from files |
 | `src/imgui_vnoiser/morlet.py` | the wavelet's name, frequency response and transform |
 | `src/imgui_vnoiser/pipeline.py` | `Settings`, staged `compute`, per-band details |
+| `src/imgui_vnoiser/style.py` | the palette, the theme and the colormaps |
 | `src/imgui_vnoiser/plotting.py` | ImPlot helpers |
 | `src/imgui_vnoiser/config.py` | saved UI scale and its detection |
 | `src/imgui_vnoiser/app.py` | the window |
+| `scripts/export_mesc_linescan.py` | `.mesc` line scans to `.npz` |
+| `scripts/screenshot.py` | the page screenshots in `docs/` |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md).

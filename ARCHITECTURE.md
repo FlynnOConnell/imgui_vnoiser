@@ -2,16 +2,22 @@
 
 ## Modules
 
-- `signals.py`: `SignalParams` (what the Signal page edits) and `make_signal`, returning a `Signal`: the trace,
-  its sampling rate, the ground truth when known, and event times to mark.
+- `signals.py`: `SignalParams` (what the Line scan traces page edits) and `make_signal`, returning a `Signal`: the
+  trace, its sampling rate, the noiseless trace when known, and for a line scan its `LineScan`, every step from
+  pixels to z.
 - `morlet.py`: pywt's `cmorB-C`: `name`, `response` (the Gaussian frequency response of one row, for the band
   gain curve) and `cwt`, which is exactly the call `Denoiser._cwt` makes.
 - `pipeline.py`: `Settings` (every parameter, grouped by the stage it first affects; the cluster, reduce and mask
-  groups are vnoiser's own `ClusteringConfig`, `cwtReducerConfig` and `thresConfig`), `compute`, `Run`, `Band`.
-- `plotting.py`: colors, `begin_plot` (legend above the plot), `decimate` / `line` for long traces,
-  `shade_intervals`, `hz_ticks`.
+  groups are vnoiser's own `ClusteringConfig`, `cwtReducerConfig` and `thresConfig`), `compute`, `Run`, `Band`,
+  and `noise_floor_hz`, where the input's spectrum flattens.
+- `style.py`: imgui_lab4_interface's palette, one color per trace (input, noiseless, denoised, removed, baseline),
+  the imgui-data-loader theme, and the colormaps.
+- `plotting.py`: `begin_plot` (legend in the top left), `decimate` / `line` for long traces, `shade_intervals`,
+  `hz_ticks`.
 - `config.py`: `~/.imgui_vnoiser/settings.json` and the UI scale.
-- `app.py`: `App`, the window. `controls_<page>` draws a page's parameters in the rail, `page_<page>` its plots.
+- `app.py`: `App`, the window, drawn into an `imgui_data_loader.FileDialog`: `draw_header`, `draw_body` (the rail
+  and the page) and `draw_footer`. `controls_<page>` draws a page's settings in the rail, `page_<page>` its plots,
+  `note_<page>` the paragraph under them.
 
 ## Stages
 
