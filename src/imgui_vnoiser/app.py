@@ -39,7 +39,6 @@ TITLE_WINDOW = "vnoiser"
 SIZE_WINDOW = (1560, 980)
 WIDTH_RAIL_EM = 19
 WIDTH_CAPTION_EM = 6.5
-HEIGHT_NOTE_EM = 3.6
 
 # the rail: a page key, its icon, its name, and the line under the name on its page
 PAGES = (
@@ -66,6 +65,11 @@ def section(text: str) -> None:
     imgui.dummy(imgui.ImVec2(0, 0.4 * imgui.get_font_size()))
     imgui.text_disabled(text.upper())
     imgui.separator()
+
+
+def caption(text: str) -> None:
+    """A dim line over the plot it explains."""
+    idl.text_wrapped_colored(DIM, text)
 
 
 def begin_form(name: str) -> bool:
@@ -420,7 +424,9 @@ class App:
         idl.text_wrapped_colored(DIM, hint)
         imgui.separator()
         note = self.note() if self.ready else ""
-        height_note = HEIGHT_NOTE_EM * em if note else 0.0
+        width = imgui.get_content_region_avail().x
+        # the text, the dummy over it, and the spacing before and inside the note's child
+        height_note = imgui.calc_text_size(note, wrap_width=width).y + 0.2 * em + 2 * imgui.get_style().item_spacing.y if note else 0.0
         imgui.push_style_var(imgui.StyleVar_.item_spacing, imgui.ImVec2(0.6 * em, 0.25 * em))
         with imgui_ctx.begin_child("##plots", imgui.ImVec2(0, -height_note)):
             if self.ready:
@@ -524,7 +530,8 @@ class App:
         if sig.truth is not None:
             r = float(np.corrcoef(sig.x[ls.n_startup:], sig.truth[ls.n_startup:])[0, 1])
             return text + f" Here z correlates {r:.2f} with the noiseless z."
-        return text + " A line without a bright stripe adds only noise to F: untick it."
+        return text + (" A line without a bright stripe adds only noise to F: untick it. A stripe that wanders is "
+                       "motion. The baseline should follow the slow decline (bleaching) and nothing faster.")
 
     def note_scalogram(self) -> str:
         run = self.run
@@ -533,7 +540,8 @@ class App:
                 f"{freqs.min():.2g} Hz at the bottom to {freqs.max():.0f} Hz at the top. ")
         if self.heat_mode == 1:
             text += "Color is each row's amplitude over its median, so a row lights up where it is above its usual level. "
-        text += "Events are vertical streaks; a row with even speckle everywhere holds noise."
+        text += ("Events are vertical streaks: spikes reach up into the fast rows, slow depolarizations stay low. A "
+                 "row with even speckle everywhere holds noise.")
         if run.signal.fs / 2 < freqs.max():
             text += f" Rows above the orange line ({run.signal.fs / 2:.0f} Hz) are faster than the sampling rate allows."
         return text
@@ -543,7 +551,7 @@ class App:
         if not run.bands:
             return ""
         text = (f"The {run.freqs.size} rows form {len(run.bands)} bands; {len(run.kept)} have events and stay in the "
-                "sum. The white curve is how much of a sine at each frequency the sum passes with every mask at 1.")
+                "sum. A band should sit on signal or on noise, not across both.")
         edge = noise_floor_hz(run.psd, run.signal.fs) if run.psd else None
         if edge is None:
             return text
@@ -864,11 +872,13 @@ class App:
         implot.colormap_scale("##scale", lo, hi, imgui.ImVec2(4 * em, h))
         implot.pop_colormap()
         k = self.row
+        caption("Below: the trace, the selected row (the part of the trace moving at that speed), and its envelope, "
+                "the row's strength at each moment, traced over the row's peaks.")
         root = math.sqrt(run.scales[k])
         if self.begin_time_plot("##row", -1):
             self.line("input", sig.x, P.INPUT)
             self.line(f"row {k}, {freqs[k]:.3g} Hz", run.coeff[k].real / root, P.ACCENT, 1.5)
-            self.line("its amplitude", run.amp[k], P.LEVEL_UP, 1.0)
+            self.line("envelope", run.amp[k], P.LEVEL_UP, 1.0)
             implot.end_plot()
 
     # ------------------------------------------------------------------
@@ -925,6 +935,8 @@ class App:
         run = self.run
         order = self.band_order()
         freqs = run.freqs
+        caption("Each colored block is a band, covering the rows (dots) it groups; faded blocks are dropped. The white "
+                "line is the gain of the kept bands summed: 1 passes a frequency unchanged, 0 removes it.")
         h1 = self.plot_height(0.28)
         title = f"{freqs.size} rows in {len(run.bands)} bands"
         if P.begin_plot(title, imgui.ImVec2(-1, h1), implot.Flags_.no_legend):
@@ -946,6 +958,9 @@ class App:
                 implot.plot_line("##gain", fx, band_sum_gain(run, fx), P.spec(P.TEXT, 2))
             implot.end_plot()
         spectrum = run.psd if self.has("final") else None
+        if spectrum:
+            caption("Power at each frequency in the trace and the denoised trace, with each band shaded behind the "
+                    "frequencies it covers.")
         h2 = imgui.get_content_region_avail().y * 0.55
         if spectrum and self.begin_spectrum("##spectrum", imgui.ImVec2(-1, h2)):
             f = spectrum["f"]
@@ -965,10 +980,12 @@ class App:
             if edge is not None:
                 P.vlines(f"noise floor from {edge:.0f} Hz", [edge], P.DIM, 1.5)
             implot.end_plot()
-        if self.has("reduce") and P.begin_plot("time kept (%), events above each bar", imgui.ImVec2(-1, -1), implot.Flags_.no_legend):
+        if self.has("reduce"):
+            caption("How much of the recording each band is kept for; the number on a bar is its event windows.")
+        if self.has("reduce") and P.begin_plot("##kept", imgui.ImVec2(-1, -1), implot.Flags_.no_legend):
             n = run.signal.n
             bands = run.bands
-            implot.setup_axes("", "", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
+            implot.setup_axes("", "kept (%)", implot.AxisFlags_.auto_fit, implot.AxisFlags_.auto_fit)
             implot.setup_axis_ticks(implot.ImAxis_.x1, [float(i) for i in range(len(bands))], [b.span for b in bands], False)
             for i, band in enumerate(bands):
                 if band.label is not None:
